@@ -148,7 +148,8 @@ type OpName =
   | 'click' | 'shift-click' | 'double-click text' | 'double-click image then text'
   | 'type nonce' | 'bold mid-word' | 'escape' | 'click empty' | 'marquee'
   | 'rail hop' | 'undo' | 'redo' | 'undo round-trip' | 'delete selection'
-  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key' | 'spelling fix';
+  | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key' | 'spelling fix'
+  | 'link mid-word';
 
 interface Violation { seed: number; step: number; op: OpName; oracle: string; detail: string }
 
@@ -390,6 +391,7 @@ function chooseOp(next: () => number, pre: CrossState): OpName {
     add('bold mid-word', 2);
     add('click', 2); // click the other box mid-typing, no Escape first
     add('spelling fix', 1);
+    add('link mid-word', 1);
   }
   add('escape', 1);
   add('click empty', 1);
@@ -621,6 +623,36 @@ async function performOp(
       await wait(300);
       if (await snapshot() !== before) {
         flag('undoRoundTrip', `undo after the confirmed slide deletion did not restore the deck: ${await snapshot()}`);
+      }
+      return 'same';
+    }
+    case 'link mid-word': {
+      // Cmd/Ctrl+K opens a dialog that takes the keyboard while the text edit
+      // stays open underneath: the link, and the typing after it, must land
+      // in the box being edited and nowhere else.
+      const head = `k${uniqueToken()}`;
+      const tail = `l${uniqueToken()}x`;
+      await session.type(head);
+      await session.chord('k', 'KeyK', 75, MOD);
+      await wait(120);
+      const opened = await session.cdp.evaluate<boolean>(
+        `document.activeElement === document.querySelector('.text-link-dialog input')`);
+      if (!opened) {
+        flag('routing', 'Cmd/Ctrl+K while editing did not open the link dialog');
+        return 'same';
+      }
+      const href = `https://example.com/${uniqueToken()}`;
+      await session.type(href);
+      await session.key('Enter', 13);
+      await wait(120);
+      await session.type(tail);
+      await wait(120);
+      await checkRouting(pre, head, flag);
+      await checkRouting(pre, tail, flag);
+      const linkedIn = await session.cdp.evaluate<string[]>(`[...document.querySelectorAll(
+        '#canvas [data-element-id] a[href="${href}"]')].map((a) => a.closest('[data-element-id]').dataset.elementId)`);
+      if (pre.editing && (linkedIn.length !== 1 || linkedIn[0] !== pre.editing)) {
+        flag('routing', `the link made while editing ${pre.editing} landed in [${linkedIn.join(', ') || 'nowhere'}]`);
       }
       return 'same';
     }

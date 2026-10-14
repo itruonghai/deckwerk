@@ -61,8 +61,12 @@ import {
 } from './listEditing.js';
 import {
   applyTypedLink,
+  linkAtRange,
   linkHrefForText,
   linkifySelection,
+  retargetLink,
+  setLinkAtSelection,
+  unlinkAnchor,
   typedLinkAtCaret,
 } from './linkEditing.js';
 import {
@@ -689,6 +693,19 @@ type DragMode =
 /** Fired on the canvas host with a message (`detail`) for the shell's status bar. */
 export const CANVAS_NOTICE_EVENT = 'deckwerk-canvas-notice';
 
+/** The selection the link dialog was opened on (see `EditorCanvas.textLinkTarget`). */
+export interface TextLinkBookmark {
+  elementId: string;
+  body: HTMLElement;
+  range: Range;
+  /** The link the selection is in, which Save retargets and Remove unwraps. */
+  anchor: HTMLAnchorElement | null;
+  /** The box's text when the dialog opened; any change makes the bookmark stale. */
+  text: string;
+  href: string | null;
+  selectedText: string;
+}
+
 export class EditorCanvas {
   private store: EditorStore;
   private host: HTMLElement;
@@ -890,6 +907,8 @@ export class EditorCanvas {
   onTableBorderPaintModeChange?: () => void;
   /** Routes undo/redo through the active shell while editing text in place. */
   onUndoRequest?: (redo: boolean) => void;
+  /** Cmd/Ctrl+K while editing text: the shell opens the link dialog (textLinkDialog.ts). */
+  onTextLinkRequest?: () => void;
   /** Pointer position in slide space on every move, null on leave. For presence. */
   onPointerSample?: (point: { x: number; y: number } | null) => void;
   /** Fired after the stage scale/placement recomputes. For presence overlays. */
@@ -3090,9 +3109,15 @@ export class EditorCanvas {
     if (hit && !this.store.get().selection.has(hit.id)) this.store.select([hit.id]);
 
     const actions = this.contextActions?.(hit) ?? [];
-    const items: Array<ContextMenuEntry> = actions.length
-      ? [...spelling, 'separator', ...actions]
+    // In the box being edited the Cmd/Ctrl+K action comes with spelling: both
+    // act on the words under the pointer.
+    const request = this.editingId ? this.onTextLinkRequest : undefined;
+    const textItems: Array<ContextMenuEntry> = request
+      ? [...spelling, ...(spelling.length ? ['separator' as const] : []), { label: 'Link…', action: () => request() }]
       : spelling;
+    const items: Array<ContextMenuEntry> = actions.length
+      ? [...textItems, 'separator', ...actions]
+      : textItems;
     if (items.length === 0) return;
 
     const menu = document.createElement('div');
@@ -3310,7 +3335,7 @@ export class EditorCanvas {
       && active.matches('input, select, textarea')
       && Boolean(active.closest(
         '.editor-inspector, .font-family-field, .text-table-options,'
-        + ' .text-list-toggle, .color-picker-popover',
+        + ' .text-list-toggle, .color-picker-popover, .text-link-dialog',
       ));
   }
 
@@ -4005,7 +4030,7 @@ export class EditorCanvas {
       // the font picker is used; its change handler restores focus afterward.
       if (event.relatedTarget instanceof Element
         && event.relatedTarget.closest(
-          '.font-family-field, .text-table-options, .text-list-toggle, .color-picker-popover',
+          '.font-family-field, .text-table-options, .text-list-toggle, .color-picker-popover, .text-link-dialog',
         )) return;
       // A table row/column selection is a formatting target in its own right.
       // Let typography fields take focus without ending the edit and clearing
@@ -4275,6 +4300,12 @@ export class EditorCanvas {
         this.toggleTextSelectionFormat(
           e.key === '=' || e.key === '+' ? 'superscript' : 'subscript',
         );
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+        // Ctrl+K is the browser's search shortcut on Windows and Linux; in a
+        // text box it means "link", as in every document editor.
+        e.preventDefault();
+        sealTextChunk();
+        this.onTextLinkRequest?.();
       } else if ((e.metaKey || e.ctrlKey) && ['b', 'i', 'u'].includes(e.key.toLowerCase())) {
         e.preventDefault();
         const format = e.key.toLowerCase() === 'b'
@@ -5852,6 +5883,92 @@ export class EditorCanvas {
     const on = this.spelling.isEnabled;
     items.push({ label: 'Check spelling and grammar', checked: on, action: () => this.spelling.setEnabled(!on) });
     return items;
+  }
+
+  /** The text-content surface of the box being edited, if any. */
+  private editingTextBody(): HTMLElement | null {
+    const elementId = this.editingId;
+    if (!elementId) return null;
+    return this.slideLayer.querySelector<HTMLElement>(
+      `[data-element-id="${CSS.escape(elementId)}"] .text-content`,
+    );
+  }
+
+  /**
+   * What the link dialog edits, captured when it opens: the selection in the
+   * box being edited and the link it is in, bound to that box and its text.
+   *
+   * The selection is kept as a live Range (DOM ranges follow the edits made
+   * around them) rather than text offsets: an offset cannot tell the end of a
+   * link from the start of the text after it, or the end of one list item from
+   * the start of the next. The text is kept too, so a box that changed while
+   * the dialog was open -- a collaborator typing, an undo -- is noticed and the
+   * dialog refuses, rather than linking whatever words now sit there.
+   */
+  textLinkTarget(): TextLinkBookmark | null {
+    const body = this.editingTextBody();
+    const elementId = this.editingId;
+    if (!body || !elementId) return null;
+    const live = this.activeTextRange(body) ?? this.textSelectionRange;
+    if (!live || !body.contains(live.commonAncestorContainer)) return null;
+    const range = live.cloneRange();
+    const anchor = linkAtRange(body, range);
+    return {
+      elementId,
+      body,
+      range,
+      anchor,
+      text: body.textContent ?? '',
+      href: anchor?.getAttribute('href') ?? null,
+      selectedText: range.toString(),
+    };
+  }
+
+  /**
+   * Apply the link dialog's answer to the selection it was opened on: link it
+   * to `href`, or with null remove the link it is in. One undo step, under the
+   * same commit path as formatting.
+   *
+   * 'stale' when the box is no longer being edited or its text changed since
+   * the dialog opened; 'unsupported' when the selection cannot carry one link
+   * (it spans paragraphs, or part of another link). Neither changes anything.
+   */
+  applyTextLink(bookmark: TextLinkBookmark, href: string | null): 'done' | 'stale' | 'unsupported' {
+    const body = this.editingTextBody();
+    if (!body || body !== bookmark.body || this.editingId !== bookmark.elementId
+      || (body.textContent ?? '') !== bookmark.text) return 'stale';
+    body.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    if (!selection) return 'stale';
+    selection.removeAllRanges();
+    selection.addRange(bookmark.range);
+    // The run being typed is its own undo step, not part of the link.
+    this.sealTextChunk?.();
+    const anchor = bookmark.anchor && body.contains(bookmark.anchor) ? bookmark.anchor : null;
+    const label = href === null
+      ? (anchor && unlinkAnchor(anchor, selection) ? 'Remove link' : null)
+      : anchor ? retargetLink(anchor, href, selection) : setLinkAtSelection(body, selection, href);
+    if (!label) {
+      // Leave the selection where the author made it.
+      selection.removeAllRanges();
+      selection.addRange(bookmark.range);
+      return 'unsupported';
+    }
+    this.textSelectionRange = this.activeTextRange(body)?.cloneRange() ?? null;
+    this.commitLiveTextDom(label);
+    return 'done';
+  }
+
+  /** Give the keyboard back to the box being edited, with the selection the dialog was opened on. */
+  resumeTextEdit(bookmark: TextLinkBookmark): void {
+    const body = this.editingTextBody();
+    if (!body || body !== bookmark.body) return;
+    body.focus({ preventScroll: true });
+    if (!body.contains(bookmark.range.commonAncestorContainer)) return;
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(bookmark.range);
+    this.textSelectionRange = bookmark.range.cloneRange();
   }
 
   /**

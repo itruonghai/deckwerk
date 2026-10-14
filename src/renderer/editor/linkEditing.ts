@@ -185,3 +185,112 @@ export function applyTypedLink(link: TypedLink, selection: Selection): HTMLAncho
   }
   return anchor;
 }
+
+/*
+ * Cmd/Ctrl+K: add, change or remove the link on the selection, through a
+ * dialog (textLinkDialog.ts). The functions below are the DOM half; the
+ * canvas seals the typing run first and commits each as one undo step.
+ */
+
+/**
+ * The address typed into the link dialog, or null if it is not one. More
+ * forgiving than `linkHrefForText`, which guards automatic linking: someone
+ * who opened the dialog to make a link may type a bare `arxiv.org/abs/…`.
+ */
+export function linkHrefForInput(text: string): string | null {
+  const typed = linkHrefForText(text);
+  if (typed) return typed;
+  const candidate = text.trim();
+  return /^[^\s/?#:@]+\.[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i.test(candidate) ? `https://${candidate}` : null;
+}
+
+/** The link the range is in -- caret or selection inside one anchor -- if any. */
+export function linkAtRange(body: HTMLElement, range: Range): HTMLAnchorElement | null {
+  if (!body.contains(range.commonAncestorContainer)) return null;
+  const start = enclosingAnchor(range.startContainer, body);
+  if (!start) return null;
+  return range.collapsed || enclosingAnchor(range.endContainer, body) === start ? start : null;
+}
+
+/**
+ * Point the selection at `href`: retarget the link it is in, link the
+ * selected text, or -- with nothing selected -- insert the address itself as
+ * a link at the caret. Returns the undo label, or null when the selection
+ * cannot carry one link (it spans paragraphs, or only part of a link).
+ */
+export function setLinkAtSelection(
+  body: HTMLElement,
+  selection: Selection,
+  href: string,
+): 'Edit link' | 'Insert link' | null {
+  if (selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!body.contains(range.commonAncestorContainer)) return null;
+  const existing = linkAtRange(body, range);
+  if (existing) return retargetLink(existing, href, selection);
+  if (!range.collapsed) {
+    const anchor = linkifySelection(body, selection, href);
+    if (!anchor) return null;
+    // The words stay selected, as after Bold: a second Cmd/Ctrl+K edits this
+    // link rather than offering to insert another after it.
+    selectContents(anchor, selection);
+    return 'Insert link';
+  }
+  // A caret inside a word would split it; the address goes where the caret is.
+  const doc = body.ownerDocument ?? document;
+  const anchor = doc.createElement('a');
+  anchor.setAttribute('href', href);
+  anchor.textContent = href.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+  range.insertNode(anchor);
+  // A space after it, so typing on does not extend the link -- unless the
+  // text after it already starts with one.
+  const following = anchor.nextSibling;
+  if (following instanceof Text && WHITESPACE.test(following.data[0] ?? '')) {
+    const caret = doc.createRange();
+    caret.setStart(following, 1);
+    caret.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+  } else {
+    anchor.after(doc.createTextNode(' '));
+    placeCaretAfter(anchor.nextSibling!, selection);
+  }
+  return 'Insert link';
+}
+
+/** Point an existing link at `href`, selecting its words. */
+export function retargetLink(anchor: HTMLAnchorElement, href: string, selection: Selection): 'Edit link' {
+  anchor.setAttribute('href', href);
+  selectContents(anchor, selection);
+  return 'Edit link';
+}
+
+/** Turn the link the selection is in back into plain text, keeping its words selected. */
+export function removeLinkAtSelection(body: HTMLElement, selection: Selection): boolean {
+  if (selection.rangeCount === 0) return false;
+  const anchor = linkAtRange(body, selection.getRangeAt(0));
+  return anchor ? unlinkAnchor(anchor, selection) : false;
+}
+
+/** Turn a link back into plain text, keeping its words (and their formatting) selected. */
+export function unlinkAnchor(anchor: HTMLAnchorElement, selection: Selection): boolean {
+  if (!anchor.parentNode) return false;
+  const first = anchor.firstChild;
+  const last = anchor.lastChild;
+  anchor.replaceWith(...anchor.childNodes);
+  if (first && last) {
+    const range = (anchor.ownerDocument ?? document).createRange();
+    range.setStartBefore(first);
+    range.setEndAfter(last);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  return true;
+}
+
+function selectContents(node: Node, selection: Selection): void {
+  const range = (node.ownerDocument ?? document).createRange();
+  range.selectNodeContents(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}

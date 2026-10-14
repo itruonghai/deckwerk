@@ -157,6 +157,8 @@ export class Inspector {
   /** Apply weight to only the selected characters in the live text edit. */
   onApplyTextSelectionWeight?: (weight: number) => boolean;
   onToggleTextSelectionFormat?: (format: InlineTextFormat) => boolean;
+  /** Open the link dialog on the selection being edited (the Cmd/Ctrl+K action). */
+  onEditTextLink?: () => void;
   textSelectionFormatState?: (format: InlineTextFormat) => boolean;
   /** Apply a family to only the selected characters in the live text edit. */
   onApplyTextSelectionFontFamily?: (value: string) => boolean;
@@ -2054,6 +2056,22 @@ export class Inspector {
             formatButtons.appendChild(choice);
           }
           selectionStyle.appendChild(formatButtons);
+          // A link is a run of the text, like a baseline shift: it needs the
+          // words (or a caret) to act on, so it waits for an edit session.
+          // Not one of the format toggles above -- it opens a dialog rather
+          // than switching a style on and off -- so it gets a row of its own.
+          const linkButtons = document.createElement('div');
+          linkButtons.className = 'button-row text-link-buttons';
+          const link = button('Link…', () => this.onEditTextLink?.());
+          link.classList.add('text-format-link');
+          const linkTitle = 'Link (Cmd/Ctrl+K)';
+          link.title = editing ? linkTitle : `${linkTitle} — select characters in the text first`;
+          link.setAttribute('aria-label', linkTitle);
+          link.disabled = !editing || !this.onEditTextLink;
+          // Keep the text selection the dialog is about to act on.
+          link.addEventListener('pointerdown', (event) => event.preventDefault());
+          linkButtons.appendChild(link);
+          selectionStyle.appendChild(linkButtons);
           typography.content.appendChild(selectionStyle);
         }
 

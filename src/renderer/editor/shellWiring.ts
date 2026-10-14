@@ -26,6 +26,7 @@ import {
   type TextFormat,
 } from './textFormatting.js';
 import { showPasteThemeDialog } from './pasteThemeDialog.js';
+import { showTextLinkDialog } from './textLinkDialog.js';
 import { isLinkedMediaSrc, videoEmbedFor } from '@shared/linkedMedia.js';
 
 /**
@@ -138,6 +139,7 @@ export function wireCanvasInspector(
   inspector.onApplyTableCellTextStyle = (property, value) =>
     canvas.applyTableCellTextStyle(property, value);
   inspector.onInsertTableColumn = (after) => canvas.insertTableColumn(after);
+  inspector.onEditTextLink = () => void showTextLinkDialog(canvas);
   inspector.onDeleteTableColumn = () => canvas.deleteTableColumn();
   inspector.textComputedTypography = (elementId) => canvas.textComputedTypography(elementId);
   inspector.onToggleMask = (id) => canvas.toggleMaskMode(id);
@@ -240,6 +242,7 @@ export function bindEditorKeys(deps: ShellDeps, clipboard: ClipboardActions): vo
   // The contenteditable text surface stops keyboard events before they reach
   // the window. Give it the same shell-aware undo path used below (including
   // collaboration's selective undo implementation).
+  canvas.onTextLinkRequest = () => void showTextLinkDialog(canvas);
   canvas.onUndoRequest = (redo) => {
     if (redo) (deps.redo ?? (() => store.redo()))();
     else (deps.undo ?? (() => store.undo()))();

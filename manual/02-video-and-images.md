@@ -1,6 +1,6 @@
 # Video and images
 
-Media is placed directly on the slide and stays as a real file in the presentation folder.
+Media is placed directly on the slide and stays as a real file in the presentation folder, unless you link it from the web.
 
 ### Add media
 
@@ -9,6 +9,14 @@ Drag an image or video from your file manager and drop it onto the slide. It lan
 Videos start muted, looped, and set to autoplay. Change those options under **Props** after selecting the video.
 
 > Screenshot placeholder: Dropping a video onto a slide.
+
+### Link media from the web
+
+Click **Link** in the toolbar and paste a YouTube or Vimeo link, or a direct `https://` link to an image or video file. Nothing is copied into the presentation, so it stays small; the media loads from the web whenever the slide is shown, which needs an internet connection.
+
+YouTube and Vimeo videos play in the provider's own player while presenting. Press play when you reach them; pressing **B** or hiding the video with a build pauses it. A link with a start time, such as `youtu.be/…?t=1m30s`, starts there. In an exported PDF, clicking a linked video opens it at that time.
+
+To point an element at a different address, edit **Props → Source → Link**.
 
 ### Preview video
 
