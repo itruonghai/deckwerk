@@ -36,6 +36,7 @@ import {
   type ShellDeps,
 } from '../editor/shellWiring.js';
 import { SlideRail } from '../editor/slideRail.js';
+import { createLinkMediaButton } from '../editor/linkMediaDialog.js';
 import { EditorStore } from '../editor/store.js';
 import { createThemePanel } from '../editor/themePanel.js';
 import { TimelinePanel } from '../editor/timelinePanel.js';
@@ -934,6 +935,7 @@ function buildToolbar(): void {
     barIconButton('Text', TEXT_ICON, () => canvas.beginTextEdit(insertText(store).id)),
     createShapeInsertPicker(store),
     createTableInsertPicker(store),
+    createLinkMediaButton(store, runOperation),
   );
 
   const right = document.createElement('div');

@@ -16,6 +16,7 @@ import {
 import { PLAYER_TYPE_CSS } from '@shared/playerTypeCss.js';
 import { browserDeckRevision } from './agentBridge.js';
 import { sanitizeAuthoredHtml, type HtmlSanitizationReport } from '@shared/htmlSafety.js';
+import { deckLinkedMedia } from '@shared/linkedMedia.js';
 
 /**
  * Compiling authored HTML inside the editor itself.
@@ -66,7 +67,7 @@ export async function compileAuthoredHtml(
     // Deck-relative asset paths must resolve the way the player resolves them,
     // which in this window is the deck: scheme rather than a file URL.
     doc.open();
-    const sanitized = sanitizeAuthoredHtml(authored);
+    const sanitized = sanitizeAuthoredHtml(authored, deckLinkedMedia(deck));
     doc.write(authoringPageHtml({
       authored: sanitized.html,
       typeCss: PLAYER_TYPE_CSS,
@@ -105,13 +106,29 @@ export async function compileAuthoredHtml(
   }
 }
 
+/**
+ * How long a save waits on one image. Deck files answer at once; a linked
+ * picture (an https: address) depends on a host that may never answer, and
+ * a stalled request must not hold an agent's save forever. A box whose
+ * picture is still missing then measures by its authored size, which is what
+ * every deck object has anyway.
+ */
+const IMAGE_SETTLE_TIMEOUT_MS = 8_000;
+
 /** Resolve once every image has loaded or failed; a broken asset must not hang a save. */
 function imagesSettled(doc: Document): Promise<unknown> {
   return Promise.all([...doc.images].map((image) => image.complete
     ? Promise.resolve()
     : new Promise<void>((resolve) => {
-      image.addEventListener('load', () => resolve(), { once: true });
-      image.addEventListener('error', () => resolve(), { once: true });
+      const done = (): void => {
+        clearTimeout(timer);
+        image.removeEventListener('load', done);
+        image.removeEventListener('error', done);
+        resolve();
+      };
+      const timer = setTimeout(done, IMAGE_SETTLE_TIMEOUT_MS);
+      image.addEventListener('load', done, { once: true });
+      image.addEventListener('error', done, { once: true });
     })));
 }
 

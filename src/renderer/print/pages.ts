@@ -4,6 +4,7 @@ import { resolveState, type SlideState } from '@shared/timeline.js';
 import { pdfSteps } from '@shared/pdfExport.js';
 import { renderSlide } from '../player/render.js';
 import { applyStaticSlideState } from '../player/staticState.js';
+import { linkedVideoWatchUrl } from '@shared/linkedMedia.js';
 
 /**
  * Building the printable pages for a deck, shared by the two ways a PDF is
@@ -63,13 +64,42 @@ export function buildPrintPages(
       // pins every video to an exact frame under a timeout. 'metadata' would
       // leave the pinned seek racing the network inside that timeout, which
       // showed up as nondeterministic frames in the PDF-vs-player pixel test.
-      stage.appendChild(renderSlide(slide, { resolveSrc }));
+      stage.appendChild(renderSlide(slide, { resolveSrc, printing: true }));
       const state = resolveState(slide, step);
       applyStaticSlideState(stage, slide, state);
+      linkPrintedVideos(stage, slide);
       page.appendChild(stage);
       container.appendChild(page);
       pages.push({ page, slide, state });
     }
   }
   return pages;
+}
+
+/**
+ * A video cannot play on a PDF page, so a linked one (a YouTube, Vimeo or
+ * other web address) becomes a click-through: a link the size of the element,
+ * laid over its still, opens the video at its in-point. Both PDF paths keep
+ * `<a href>` as a link annotation (Chromium's printToPDF and Save as PDF).
+ * Videos stored in the deck have no address outside it and stay plain stills.
+ */
+function linkPrintedVideos(stage: HTMLElement, slide: Slide): void {
+  const nodes = new Map<string, HTMLElement>();
+  for (const node of stage.querySelectorAll<HTMLElement>('[data-element-id]')) {
+    if (node.dataset.elementId) nodes.set(node.dataset.elementId, node);
+  }
+  for (const el of slide.elements) {
+    if (el.type !== 'video') continue;
+    const href = linkedVideoWatchUrl(el.src, el.start);
+    if (!href) continue;
+    const node = nodes.get(el.id);
+    if (!node) continue;
+    const link = document.createElement('a');
+    link.className = 'pdf-video-link';
+    link.href = href;
+    link.title = 'Play video';
+    link.setAttribute('aria-label', 'Play video');
+    Object.assign(link.style, { position: 'absolute', inset: '0', display: 'block', zIndex: '1' });
+    node.appendChild(link);
+  }
 }

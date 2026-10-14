@@ -1,6 +1,7 @@
 import type { AssetImportProgress, ImportedAsset, MediaInfo } from '@shared/ipc.js';
 import { clipboardImageName, type ClipboardImageSource } from '@shared/clipboardImages.js';
 import { pinMediaVariant } from './mediaVariants.js';
+import { withLinkedMedia } from '@shared/linkedMedia.js';
 
 /**
  * The browser collab client's stand-in for the Electron preload bridge.
@@ -71,10 +72,10 @@ function isOwnDeckAsset(raw: string): boolean {
 export function installNetApi(options: NetApiOptions): void {
   const deck = encodeURIComponent(options.deckId);
   const api = {
-    assetUrl: (src: string): string => pinMediaVariant(
+    assetUrl: withLinkedMedia((src: string): string => pinMediaVariant(
       src,
       `/decks/${deck}/${src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`,
-    ),
+    )),
 
     importAssetFiles: async (files: File[], progressToken?: string): Promise<ImportedAsset[]> => {
       const imported: ImportedAsset[] = [];

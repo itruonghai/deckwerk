@@ -30,6 +30,7 @@ import { Inspector } from './inspector.js';
 import { HistoryPanel } from './historyPanel.js';
 import { authoredHtmlSync, fileName } from './htmlCompile.js';
 import { createShapeInsertPicker, createTableInsertPicker, insertText } from './elementCreation.js';
+import { createLinkMediaButton } from './linkMediaDialog.js';
 import { createToolbarPicker, createToolbarSplitButton } from './exportPicker.js';
 import { showPdfExportDialog } from './pdfExportDialog.js';
 import { showWebExportDialog } from './webExportDialog.js';
@@ -534,6 +535,7 @@ function buildToolbar(): void {
     barIconButton('Text', TEXT_ICON, () => addText()),
     createShapeInsertPicker(store),
     createTableInsertPicker(store),
+    createLinkMediaButton(store, runOperation),
   );
 
   const right = document.createElement('div');

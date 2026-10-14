@@ -22,6 +22,7 @@ import { mediaVariantsSnapshot, pinMediaVariant, setMediaVariants } from './medi
 import { trackVideoLoading } from '../player/videoLoadingProgress.js';
 import { eventOnInteractiveWeb, slideLinkFromEvent } from '../player/links.js';
 import { selectionPreventsAdvance } from '../player/presentationPointer.js';
+import { withLinkedMedia } from '@shared/linkedMedia.js';
 
 /**
  * The collab presentation page, in either of its two roles.
@@ -175,10 +176,9 @@ const readiness = new PlayerPaintReadiness({
 });
 readiness.connecting();
 
-function resolveSrc(src: string): string {
-  return pinMediaVariant(src, `/decks/${encodeURIComponent(deckId!)}/`
-    + src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/'));
-}
+const resolveSrc = withLinkedMedia((src: string): string =>
+  pinMediaVariant(src, `/decks/${encodeURIComponent(deckId!)}/`
+    + src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')));
 
 /* --- audience -------------------------------------------------------------- */
 

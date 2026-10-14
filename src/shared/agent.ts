@@ -12,6 +12,7 @@ import {
 import { renameRetiredFields } from './fieldAliases.js';
 import { contentOf, keepComments, keepSlideComments, mergeComments, setComments } from './comments.js';
 import { braceDepthOf } from './brace.js';
+import { isLinkedMediaSrc } from './linkedMedia.js';
 
 export const AGENT_PROTOCOL_VERSION = 1 as const;
 
@@ -443,8 +444,10 @@ export function validateDeckIntegrity(deck: Deck, assetExists?: (src: string) =>
       if (elementIds.has(element.id)) errors.push(`Duplicate element id: ${element.id}`);
       elementIds.add(element.id);
       if (assetExists && (element.type === 'image' || element.type === 'video' || element.type === 'web')) {
-        if (!assetExists(element.src)) errors.push(`Missing asset for ${element.id}: ${element.src}`);
-        if ((element.type === 'video' || element.type === 'web') && element.poster && !assetExists(element.poster)) {
+        const linked = element.type !== 'web' && isLinkedMediaSrc(element.src);
+        if (!linked && !assetExists(element.src)) errors.push(`Missing asset for ${element.id}: ${element.src}`);
+        const linkedPoster = element.type === 'video' && isLinkedMediaSrc(element.poster);
+        if ((element.type === 'video' || element.type === 'web') && element.poster && !linkedPoster && !assetExists(element.poster)) {
           errors.push(`Missing poster for ${element.id}: ${element.poster}`);
         }
       }

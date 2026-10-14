@@ -36,10 +36,14 @@ export function slideLinkFromEvent(event: Event): HTMLAnchorElement | null {
  * and never reaches here.
  */
 export function eventOnInteractiveWeb(event: Event): boolean {
+  // A YouTube or Vimeo player (`video-embed-frame`) takes its own clicks too:
+  // pressing play must not also move the deck on.
   for (const target of event.composedPath()) {
-    if (target instanceof HTMLIFrameElement && target.classList.contains('web-frame')) return true;
+    if (target instanceof HTMLIFrameElement
+      && (target.classList.contains('web-frame') || target.classList.contains('video-embed-frame'))) return true;
   }
-  return event.target instanceof Element && event.target.closest('iframe.web-frame') !== null;
+  return event.target instanceof Element
+    && event.target.closest('iframe.web-frame, iframe.video-embed-frame') !== null;
 }
 
 /** Activate a slide link explicitly when a host (the editor) owns pointer input. */

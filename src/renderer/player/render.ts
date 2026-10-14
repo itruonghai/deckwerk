@@ -11,6 +11,9 @@ import { quadraticPath, shapeSvg } from '@shared/shapeSvg.js';
 import { isMediaBorderPaint, typedPropertyOwnsCss } from '@shared/nativeCss.js';
 import { applyTableColumnWidths } from '@shared/paragraphs.js';
 import { isEmbeddableWebSrc, webReadinessAction } from '@shared/webBridge.js';
+import {
+  embedPauseMessage, embedPlayerUrl, embedThumbnailUrl, isLinkedMediaSrc, videoEmbedFor, type VideoEmbed,
+} from '@shared/linkedMedia.js';
 import renderMathInElement from 'katex/contrib/auto-render';
 import 'katex/dist/katex.min.css';
 
@@ -51,6 +54,11 @@ export interface RenderOptions {
    * `mediaPreload: 'metadata'`.
    */
   deferVideoSrc?: boolean;
+  /**
+   * The slide is being laid out for a PDF page. Content that only works live
+   * (a YouTube or Vimeo player) is drawn as a still instead.
+   */
+  printing?: boolean;
 }
 
 export { quadraticPath };
@@ -136,6 +144,9 @@ export function applyMediaFitStyles(
 ): void {
   const body = elementBody(node);
   if (!body) return;
+  // A YouTube or Vimeo embed always fills its box (renderVideoEmbed): its
+  // still must not take a fit or crop the live player cannot show.
+  if (body.classList.contains('video-embed-body')) return;
   const tag = /^(img|video|embed)$/.test(body.tagName.toLowerCase())
     ? (body as HTMLElement)
     : body.querySelector<HTMLElement>('img, video, embed');
@@ -1130,6 +1141,8 @@ function renderVideo(
   opts: RenderOptions,
 ): HTMLElement {
   if (isPendingSrc(el.src)) return renderPendingPlaceholder(el.src);
+  const embed = videoEmbedFor(el.src);
+  if (embed) return renderVideoEmbed(el, embed, opts);
   const video = document.createElement('video');
   video.playsInline = true;
   video.dataset.mediaKey = videoPresentationKey(el, opts.resolveSrc(el.src));
@@ -1148,13 +1161,18 @@ function renderVideo(
   // Both asset servers answer `Access-Control-Allow-Origin: *`. Same-origin
   // media (the collab client) is left alone: the attribute would only add a
   // preflight-shaped failure mode for no gain.
-  if (preload === 'metadata' && isCrossOrigin(src)) video.crossOrigin = 'anonymous';
+  // Linked media is the exception: a third-party host need not answer CORS,
+  // and asking would fail the load outright. Its preview still is then cut in
+  // page or not at all (previewPoster.ts tolerates a tainted canvas).
+  if (preload === 'metadata' && isCrossOrigin(src) && !isLinkedMediaSrc(el.src)) video.crossOrigin = 'anonymous';
   // Deferral only pays when someone will supply the still. Without a provider
   // (the browser collab client) the element takes its source now, exactly as
   // before: a source assigned later runs the load algorithm on an element
   // Chromium has already put in NETWORK_NO_SOURCE, whose queued 'emptied'
   // the load gate would read as a freed slot.
-  const deferSrc = preload === 'metadata' && opts.deferVideoSrc === true && previewPosterProvider() !== null;
+  // The provider cuts stills from files in the deck, never from linked media.
+  const deferSrc = preload === 'metadata' && opts.deferVideoSrc === true && previewPosterProvider() !== null
+    && !isLinkedMediaSrc(el.src);
   if (deferSrc) {
     // No src, no fetch, no decoder: the still is cut elsewhere. Stashed where
     // the gate keeps an aborted source, so recovery and capture code that
@@ -1207,6 +1225,88 @@ function renderVideo(
   video.style.objectFit = el.fit;
   if (el.style['object-position']) video.style.objectPosition = el.style['object-position'];
   return video;
+}
+
+/**
+ * A YouTube or Vimeo link on a video element, shown through the provider's
+ * player in a frame.
+ *
+ * Preview surfaces (`mediaPreload: 'metadata'`) and print never load the
+ * player: they show the provider's thumbnail (or the element's poster) under
+ * a play badge, inert so the editor's pointer handling keeps working over it.
+ * Where the deck is presented the frame is live and takes its own clicks
+ * (`eventOnInteractiveWeb`), so pressing play never advances the slide. The
+ * deck's timeline cannot drive a cross-origin player; the element's trim and
+ * playback flags travel in the player URL instead (`embedPlayerUrl`).
+ */
+function renderVideoEmbed(
+  el: Extract<SlideElement, { type: 'video' }>,
+  embed: VideoEmbed,
+  opts: RenderOptions,
+): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'video-embed-body';
+  box.dataset.embedProvider = embed.provider;
+  Object.assign(box.style, {
+    position: 'relative', width: '100%', height: '100%', overflow: 'hidden', background: '#000',
+  });
+  const label = embed.provider === 'youtube' ? 'YouTube video' : 'Vimeo video';
+  const still = el.poster ? opts.resolveSrc(el.poster) : embedThumbnailUrl(embed);
+  // What a Morph ghost of this element shows instead of a second live player.
+  if (still) box.dataset.embedStill = still;
+
+  if (opts.mediaPreload === 'metadata' || opts.printing === true) {
+    if (still) {
+      const img = document.createElement('img');
+      img.src = still;
+      img.alt = label;
+      img.draggable = false;
+      Object.assign(img.style, {
+        width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none',
+      });
+      box.appendChild(img);
+    } else {
+      box.dataset.embedPlaceholder = 'true';
+    }
+    const badge = document.createElement('div');
+    badge.className = 'video-embed-badge';
+    badge.setAttribute('aria-hidden', 'true');
+    badge.innerHTML = '<svg viewBox="0 0 68 48" width="68" height="48"><rect width="68" height="48" rx="12" fill="rgba(0,0,0,0.72)"/><path d="M27 15v18l16-9z" fill="#fff"/></svg>';
+    Object.assign(badge.style, {
+      position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)',
+      pointerEvents: 'none', lineHeight: '0',
+    });
+    box.appendChild(badge);
+    return box;
+  }
+
+  const frame = document.createElement('iframe');
+  frame.className = 'video-embed-frame';
+  frame.title = label;
+  frame.src = embedPlayerUrl(embed, el);
+  frame.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture');
+  frame.setAttribute('allowfullscreen', '');
+  frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+  Object.assign(frame.style, {
+    width: '100%', height: '100%', border: '0', display: 'block',
+  });
+  box.appendChild(frame);
+  return box;
+}
+
+/**
+ * Pause every YouTube or Vimeo player under `root` (an element hidden by a
+ * build, the screen blanked). The players are cross-origin, so this is a
+ * message through each provider's own API; a player still loading misses it,
+ * which is harmless because embeds never start by themselves.
+ */
+export function pauseVideoEmbeds(root: ParentNode): void {
+  for (const frame of root.querySelectorAll<HTMLIFrameElement>('iframe.video-embed-frame')) {
+    const provider = frame.closest<HTMLElement>('.video-embed-body')?.dataset.embedProvider;
+    if (provider !== 'youtube' && provider !== 'vimeo') continue;
+    const { message, origin } = embedPauseMessage(provider);
+    frame.contentWindow?.postMessage(message, origin);
+  }
 }
 
 /**

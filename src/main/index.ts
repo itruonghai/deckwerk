@@ -68,6 +68,7 @@ import { probeMedia, runTrim } from './ffmpeg.js';
 import { attachRendererHealth } from './windowHealth.js';
 import { POSTER_HOST, posterFor } from './posterCache.js';
 import { showOpenDialog, showSaveDialog } from './dialogs.js';
+import { installEmbedReferrer } from './embedReferrer.js';
 import { importKeynote } from './keynoteImport.js';
 import { importPowerPoint } from './pptxImport.js';
 import { loadDeckHistory, saveDeckHistory } from './deckHistoryStore.js';
@@ -592,6 +593,7 @@ app.whenReady().then(async () => {
   }
 
   installAssetProtocol();
+  installEmbedReferrer();
   registerHandlers();
 
   const initial = deckDirFromArgv();

@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import type { Deck, Slide } from '@shared/deck.js';
 import type { WebExportQuality } from '@shared/ipc.js';
+import { isLinkedMediaSrc } from '@shared/linkedMedia.js';
 import { loadTheme, resolveAsset } from './deckStore.js';
 import { encodeImageWebp, probeImage, probeMedia, transcodeVideoForWeb } from './ffmpeg.js';
 import { copyFileStreamed } from './copyFileStreamed.js';
@@ -476,14 +477,17 @@ export function renderedLongEdge(deck: Deck, rel: string): number {
   return edge > 0 ? edge : canvasEdge;
 }
 
-/** Every deck-relative asset path the slides show, deduplicated. */
+/**
+ * Every deck-relative asset path the slides show, deduplicated. Linked media
+ * (an `https:` src) is not a deck file: the export keeps the address as is.
+ */
 export function referencedAssets(deck: Deck): Set<string> {
   const wanted = new Set<string>();
   for (const slide of deck.slides) {
     if (slide.background.image) wanted.add(slide.background.image);
     for (const el of slide.elements) {
-      if (el.type === 'image' || el.type === 'video') wanted.add(el.src);
-      if (el.type === 'video' && el.poster) wanted.add(el.poster);
+      if ((el.type === 'image' || el.type === 'video') && !isLinkedMediaSrc(el.src)) wanted.add(el.src);
+      if (el.type === 'video' && el.poster && !isLinkedMediaSrc(el.poster)) wanted.add(el.poster);
       if (el.type === 'web') {
         wanted.add(el.src);
         if (el.poster) wanted.add(el.poster);

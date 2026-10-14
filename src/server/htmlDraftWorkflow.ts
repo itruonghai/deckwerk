@@ -67,7 +67,9 @@ export function htmlDraftWorkflow(input: HtmlDraftWorkflowInput): HtmlDraftWorkf
     blockingIssues.push({
       code: 'blocked-resource', blocking: true,
       message: `Presentation-time external resource was blocked: ${resource}`,
-      fix: 'Import the resource once and replace the external URL with the returned deck-relative assets/ path.',
+      fix: 'Import the resource once and replace the external URL with the returned deck-relative assets/ path. '
+        + 'An image or video the deck already links by https: address may keep that exact address; '
+        + 'new linked media is added in the editor (Link…), not through HTML.',
     });
   }
   const warnings = unique(input.warnings).map((warning): HtmlDraftIssue => ({

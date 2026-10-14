@@ -9,8 +9,12 @@ export interface HtmlSanitizationReport {
  * Sanitize a complete authored document before it enters the measuring frame.
  * Imported slides can use HTML, CSS, SVG, images, video, and CSS animation.
  * They cannot run JavaScript or fetch presentation-time external resources.
+ *
+ * `linkedMedia` is the deck's own linked addresses (`deckLinkedMedia`): an
+ * `<img>`/`<video>` src or poster on that list is the deck's linked media
+ * coming back through the round trip, and stays. Nothing else external does.
  */
-export function sanitizeAuthoredHtml(source: string): {
+export function sanitizeAuthoredHtml(source: string, linkedMedia: ReadonlySet<string> = new Set()): {
   html: string;
   report: HtmlSanitizationReport;
 } {
@@ -35,6 +39,21 @@ export function sanitizeAuthoredHtml(source: string): {
         report.removedEventHandlers += 1;
         continue;
       }
+      // A responsive image list or an inline style is as able to fetch as a
+      // src. These were always removed by the windows' policy; now that the
+      // policy admits linked media, they are removed here.
+      if (name === 'srcset' && /(?:^|,)\s*(?:https?:|\/\/)/i.test(attribute.value)) {
+        node.removeAttribute(attribute.name);
+        report.blockedUrls.push(attribute.value);
+        continue;
+      }
+      if (name === 'style' && /url\(\s*['"]?\s*(?:https?:|\/\/)/i.test(attribute.value)) {
+        node.setAttribute(attribute.name, attribute.value.replace(/url\(\s*(['"]?)\s*(?:https?:|\/\/)[^)]*\)/gi, (match) => {
+          report.blockedUrls.push(match);
+          return 'none';
+        }));
+        continue;
+      }
       if (!['src', 'href', 'poster', 'xlink:href', 'action', 'formaction'].includes(name)) continue;
       const value = attribute.value.trim();
       // The URL parser strips ASCII tabs, newlines and other control characters
@@ -44,10 +63,14 @@ export function sanitizeAuthoredHtml(source: string): {
       if (/^javascript:/i.test(scheme)) {
         node.removeAttribute(attribute.name);
         report.blockedUrls.push(value);
-      } else if (/^https?:/i.test(value)) {
+      } else if (/^(?:https?:|\/\/)/i.test(scheme.replaceAll('\\', '/'))) {
         // A normal anchor is inert slide content. Media, styles, and SVG links
-        // would fetch during authoring or presentation, so remove those.
-        if (!(node.tagName.toLowerCase() === 'a' && name === 'href')) {
+        // would fetch during authoring or presentation, so remove those --
+        // except the deck's own linked media coming back (see above).
+        const tag = node.tagName.toLowerCase();
+        const deckLink = (name === 'src' || name === 'poster')
+          && (tag === 'img' || tag === 'video') && linkedMedia.has(value);
+        if (!(tag === 'a' && name === 'href') && !deckLink) {
           node.removeAttribute(attribute.name);
           report.blockedUrls.push(value);
         }
@@ -61,11 +84,11 @@ export function sanitizeAuthoredHtml(source: string): {
   for (const style of document.querySelectorAll('style')) {
     const original = style.textContent ?? '';
     style.textContent = original
-      .replace(/@import\s+(?:url\()?\s*['"]?https?:[^;]+;/gi, (match) => {
+      .replace(/@import\s+(?:url\()?\s*['"]?(?:https?:|\/\/)[^;]+;/gi, (match) => {
         report.blockedUrls.push(match);
         return '/* external import removed */';
       })
-      .replace(/url\(\s*(['"]?)https?:[^)]+\)/gi, (match) => {
+      .replace(/url\(\s*(['"]?)\s*(?:https?:|\/\/)[^)]+\)/gi, (match) => {
         report.blockedUrls.push(match);
         return 'none';
       });

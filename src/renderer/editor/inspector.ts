@@ -59,6 +59,8 @@ import {
 import { mediaNaturalSize } from './mediaNatural.js';
 import { releaseDecodedVideo } from '../player/decodedVideoPool.js';
 import { angleDial } from './angleDial.js';
+import { isLinkedMediaSrc, videoEmbedFor } from '@shared/linkedMedia.js';
+import { linkedVideoPoster, probeDeadline } from './linkedMediaPoster.js';
 import {
   cssMediaBorder,
   cssMediaRadius,
@@ -686,6 +688,71 @@ export class Inspector {
     );
     masking.content.appendChild(this.maskButton(elementId));
     return masking.section;
+  }
+
+  /**
+   * The web address of linked media (see `@shared/linkedMedia`), editable in
+   * place. Anything that is not an https: address is refused, keeping the
+   * element as it was, since a deck path typed here would bypass the import
+   * that copies and checks the file.
+   */
+  private linkedSourceSection(el: Extract<SlideElement, { type: 'image' | 'video' }>): HTMLElement {
+    const source = optionSection('Source', 'media-link-options');
+    const embed = el.type === 'video' ? videoEmbedFor(el.src) : null;
+    source.content.appendChild(hint(embed
+      ? `Linked ${embed.provider === 'youtube' ? 'YouTube' : 'Vimeo'} video. It plays in the provider's player while presenting and needs the internet.`
+      : 'Linked from the web, not stored in the deck. Showing it needs the internet.'));
+    source.content.appendChild(textAreaField('Link (https address)', el.src, (value) => {
+      const next = value.trim();
+      if (!isLinkedMediaSrc(next) || next === el.src) {
+        this.render();
+        return;
+      }
+      // A poster fetched for the old link (a Vimeo thumbnail) shows the old
+      // video; it goes with the link, and the new link's own still is looked
+      // up. A poster stored in the deck was chosen by the author and stays.
+      const staleLinkedPoster = el.type === 'video' && isLinkedMediaSrc(el.poster);
+      this.store.updateSelected((e) => {
+        if (e.type !== el.type || e.id !== el.id) return;
+        e.src = next;
+        if (e.type === 'video' && staleLinkedPoster) e.poster = null;
+      });
+      if (el.type === 'video' && (staleLinkedPoster || el.poster === null)) {
+        void linkedVideoPoster(next, probeDeadline(new AbortController().signal, 10_000)).then((poster) => {
+          if (!poster) return;
+          this.store.updateSelected((e) => {
+            // Only if the link is still the one this answer is for.
+            if (e.type === 'video' && e.id === el.id && e.src === next && e.poster === null) e.poster = poster;
+          }, { label: 'Video thumbnail' });
+        });
+      }
+    }));
+    return source.section;
+  }
+
+  /**
+   * Trim for linked video. Its length cannot be probed (the file is not in the
+   * deck, and a YouTube or Vimeo player exposes no duration to the page), so
+   * the in and out points are typed in seconds rather than dragged.
+   */
+  private linkedTrimSection(el: Extract<SlideElement, { type: 'video' }>): HTMLElement {
+    const trim = optionSection('Trim', 'video-trim-options');
+    if (videoEmbedFor(el.src)?.provider === 'vimeo') {
+      trim.content.appendChild(hint('Vimeo players take a start time but no end time, so a Vimeo clip plays on past End.'));
+    }
+    trim.content.appendChild(numberField('Start', el.start, (value) =>
+      this.store.updateSelected((e) => {
+        if (e.type !== 'video') return;
+        e.start = Math.max(0, value);
+        if (e.end !== null && e.end <= e.start) e.end = null;
+      }), { step: 1, unit: 's' }));
+    trim.content.appendChild(optionalNumberField('End', el.end, (value) =>
+      this.store.updateSelected((e) => {
+        if (e.type === 'video') e.end = value > e.start ? value : null;
+      }), () => this.store.updateSelected((e) => {
+        if (e.type === 'video') e.end = null;
+      }), 's', { min: 0, step: 1, emptyLabel: 'End of video' }));
+    return trim.section;
   }
 
   /**
@@ -1612,11 +1679,15 @@ export class Inspector {
   ): HTMLElement {
     const kind = media[0].type;
     const wrap = group(kind === 'image' ? 'Image' : 'Video');
+    // The same limits as a single YouTube or Vimeo embed (see typeSection):
+    // one in the selection is enough to leave out what it cannot honour.
+    const anyEmbed = media.some((element) => element.type === 'video' && videoEmbedFor(element.src) !== null);
     if (kind === 'video') {
       const playback = optionSection('Playback', 'video-playback-options');
       const flags = document.createElement('div');
       flags.className = 'video-checkbox-grid';
-      for (const key of ['autoplay', 'loop', 'muted', 'controls'] as const) {
+      const keys = anyEmbed ? ['loop', 'muted'] as const : ['autoplay', 'loop', 'muted', 'controls'] as const;
+      for (const key of keys) {
         flags.appendChild(toggleSegment(mixedCheckboxField(
           VIDEO_FLAG_LABELS[key],
           commonValue(media.map((element) => element.type === 'video' && element[key])),
@@ -1662,7 +1733,7 @@ export class Inspector {
         }
       }),
     ));
-    wrap.appendChild(masking.section);
+    if (!anyEmbed) wrap.appendChild(masking.section);
 
     const editableBorders = media.map(editableMediaBorder);
     const borderColors = commonValue(editableBorders.map((border) => border.color ?? ''));
@@ -1705,11 +1776,15 @@ export class Inspector {
     switch (el.type) {
       case 'video': {
         const wrap = typeSections();
+        const linked = isLinkedMediaSrc(el.src);
+        const embedded = videoEmbedFor(el.src) !== null;
+        if (linked) wrap.appendChild(this.linkedSourceSection(el));
 
         const playback = optionSection('Playback', 'video-playback-options');
 
         // Preview in place. Double-clicking the video on the canvas does the
-        // same thing; this is the discoverable version.
+        // same thing; this is the discoverable version. A YouTube or Vimeo
+        // player only runs while presenting, so it has no canvas preview.
         const play = document.createElement('button');
         play.className = 'panel-action video-preview-toggle';
         const setLabel = (playing: boolean) => {
@@ -1720,13 +1795,16 @@ export class Inspector {
         play.addEventListener('click', () => {
           setLabel(this.onTogglePlay?.(el.id) ?? false);
         });
-        playback.content.appendChild(play);
+        if (!embedded) playback.content.appendChild(play);
 
         // Four independent on/off states read as one toggle strip, the same
         // idiom as Bold / Italic / Underline.
         const flags = document.createElement('div');
         flags.className = 'video-checkbox-grid';
-        for (const key of ['autoplay', 'loop', 'muted', 'controls'] as const) {
+        // A provider player never starts itself and always shows its own
+        // controls (`embedPlayerUrl`), so only Loop and Mute apply to it.
+        const keys = embedded ? ['loop', 'muted'] as const : ['autoplay', 'loop', 'muted', 'controls'] as const;
+        for (const key of keys) {
           flags.appendChild(toggleSegment(
             checkboxField(VIDEO_FLAG_LABELS[key], el[key], (v) =>
               this.store.updateSelected((e) => {
@@ -1741,15 +1819,15 @@ export class Inspector {
 
         // Trim is about time, like playback, so it sits beside it rather than
         // after the mask and border sections.
-        wrap.appendChild(this.trimSection(el));
-        wrap.appendChild(this.mediaMaskControls(el.id));
+        wrap.appendChild(linked ? this.linkedTrimSection(el) : this.trimSection(el));
+        if (!embedded) wrap.appendChild(this.mediaMaskControls(el.id));
         wrap.appendChild(this.mediaBorderControls());
         wrap.appendChild(this.mediaEffectsControls());
 
         // Last resort: the destructive ffmpeg editor. Writes a new file and
         // relinks — for when the non-destructive CSS path is not enough.
         // Desktop only: shells that can't spawn ffmpeg leave onTrimRequest unset.
-        if (this.onTrimRequest) {
+        if (this.onTrimRequest && !linked) {
           const request = this.onTrimRequest;
           const advanced = optionSection('Advanced', 'media-advanced-options');
           const edit = button('Edit w/ ffmpeg…', () => request(el), 'panel-action');
@@ -1762,12 +1840,15 @@ export class Inspector {
 
       case 'image': {
         const wrap = typeSections();
+        const linked = isLinkedMediaSrc(el.src);
+        if (linked) wrap.appendChild(this.linkedSourceSection(el));
         wrap.appendChild(this.mediaMaskControls(el.id));
         wrap.appendChild(this.mediaBorderControls());
         wrap.appendChild(this.mediaEffectsControls());
         // PDF is rendered by Chromium's document viewer rather than an image
         // decoder, so it cannot be used as a canvas source here.
-        if (this.onRasterRequest && !/\.pdf(?:$|[?#])/i.test(el.src)) {
+        // Nor can a linked picture: its host need not allow reading its pixels.
+        if (this.onRasterRequest && !linked && !/\.pdf(?:$|[?#])/i.test(el.src)) {
           const request = this.onRasterRequest;
           const advanced = optionSection('Advanced', 'media-advanced-options');
           const edit = button('Rasterize & paint…', () => request(el), 'panel-action');
@@ -3078,6 +3159,8 @@ function optionalNumberField(
     step?: number;
     themeValue?: number | null;
     maxFractionDigits?: number;
+    /** What an empty field says it means; 'theme' unless the caller says otherwise. */
+    emptyLabel?: string;
   } = {},
 ): HTMLElement {
   const wrap = document.createElement('label');
@@ -3096,7 +3179,7 @@ function optionalNumberField(
     ? String(round(number))
     : formatNumber(number, opts.maxFractionDigits);
   input.value = value === null ? (inherited === null ? '' : display(inherited)) : display(value);
-  input.placeholder = inherited === null ? 'theme' : '';
+  input.placeholder = inherited === null ? opts.emptyLabel ?? 'theme' : '';
   input.title = suffix ? `Value in ${suffix}` : label;
   input.setAttribute('aria-label', label);
   let lastAppliedValue = input.value;

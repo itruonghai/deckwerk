@@ -4,6 +4,7 @@ import type { DeckHistoryDocument } from '@shared/deckHistory.js';
 import type { ClipboardReadResult, ClipboardWriteRequest } from '@shared/clipboard.js';
 import type { ClipboardImageSource } from '@shared/clipboardImages.js';
 import { IPC } from '@shared/ipc.js';
+import { withLinkedMedia } from '@shared/linkedMedia.js';
 import type {
   AgentContextDraft,
   AgentPanelState,
@@ -190,9 +191,9 @@ const api = {
   saveRaster: (req: RasterSaveRequest): Promise<RasterResult> =>
     ipcRenderer.invoke(IPC.rasterSave, req),
 
-  /** Deck-relative asset path -> a URL this window can load. */
-  assetUrl: (src: string): string =>
-    `deck://${deckKey}/${src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`,
+  /** Deck-relative asset path -> a URL this window can load. Linked media passes through. */
+  assetUrl: withLinkedMedia((src: string): string =>
+    `deck://${deckKey}/${src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`),
 
   onDeckState: (fn: (s: DeckSession) => void): (() => void) =>
     on(IPC.deckState, fn),

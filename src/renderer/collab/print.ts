@@ -6,6 +6,7 @@ import type { PdfBuildMode } from '@shared/ipc.js';
 import { buildPrintPages, printPageRule } from '../print/pages.js';
 import { waitForPdfDocument } from '../print/readiness.js';
 import { rewriteCssAssetUrls } from '../player/render.js';
+import { withLinkedMedia } from '@shared/linkedMedia.js';
 
 /**
  * The collab client's PDF export.
@@ -35,8 +36,8 @@ if (!deckId) {
   throw new Error('missing deck');
 }
 const deckParam = encodeURIComponent(deckId);
-const assetUrl = (src: string): string =>
-  `/decks/${deckParam}/${src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`;
+const assetUrl = withLinkedMedia((src: string): string =>
+  `/decks/${deckParam}/${src.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`);
 
 /** Fit the native-pixel pages into the window; print media ignores `zoom`. */
 function fitPreview(deck: Deck): void {

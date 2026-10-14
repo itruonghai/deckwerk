@@ -1,4 +1,5 @@
 import { renameRetiredFields } from '@shared/fieldAliases.js';
+import { deckLinkedMedia, isLinkedMediaSrc } from '@shared/linkedMedia.js';
 import { spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { lookup } from 'node:dns/promises';
@@ -379,7 +380,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     if (!renditions) return variants;
     for (const slide of deck.slides) {
       for (const element of slide.elements) {
-        if (element.type !== 'video' || element.src in variants) continue;
+        if (element.type !== 'video' || element.src in variants || isLinkedMediaSrc(element.src)) continue;
         try {
           const absolute = resolveAsset(deckDir, element.src);
           const info = statSync(absolute);
@@ -1199,7 +1200,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     body: Record<string, unknown>;
     compiled: Awaited<ReturnType<typeof compileHtmlToSlides>>;
   } | { error: string }> {
-    const sanitized = await sanitizeServerHtml(html, room.session.dir);
+    const sanitized = await sanitizeServerHtml(html, room.session.dir, deckLinkedMedia(room.session.deck));
     const sanitizedAt = Date.now();
     const temp = await mkdtemp(join(tmpdir(), 'slide-http-preview-'));
     const htmlPath = join(temp, 'slides.html');
@@ -4042,8 +4043,12 @@ function validateNativeEditSafety(before: Deck, after: Deck, deckDir: string): v
       }
       if (element.type === 'image' || element.type === 'video') {
         const old = previous && (previous.type === 'image' || previous.type === 'video') ? previous : null;
-        if (element.src !== old?.src) validateEditedAsset(element.src, deckDir, `element ${element.id} src`);
-        if (element.type === 'video' && element.poster !== (old?.type === 'video' ? old.poster : null)) {
+        // Linked media (an https: address) is the one src that is not a deck file.
+        if (element.src !== old?.src && !isLinkedMediaSrc(element.src)) {
+          validateEditedAsset(element.src, deckDir, `element ${element.id} src`);
+        }
+        if (element.type === 'video' && element.poster !== (old?.type === 'video' ? old.poster : null)
+          && !isLinkedMediaSrc(element.poster)) {
           validateEditedAsset(element.poster, deckDir, `element ${element.id} poster`);
         }
       }
@@ -4074,6 +4079,7 @@ function validateEditedAsset(src: string | null | undefined, deckDir: string, la
 async function sanitizeServerHtml(
   source: string,
   deckDir: string,
+  linkedMedia: ReadonlySet<string> = new Set(),
 ): Promise<{ html: string; blocked: string[]; missing: string[]; assets: string[] }> {
   const blocked: string[] = [];
   const assets: string[] = [];
@@ -4085,6 +4091,9 @@ async function sanitizeServerHtml(
 
   html = html.replace(/(src|poster|href)\s*=\s*(["'])(https?:[^"']+)\2/gi, (match, attr: string, _quote: string, url: string) => {
     if (attr.toLowerCase() === 'href' && /^<a\b/i.test(match)) return match;
+    // The deck's own linked media coming back through the round trip (see
+    // `deckLinkedMedia`); the export escapes `&` in attribute values.
+    if (attr.toLowerCase() !== 'href' && linkedMedia.has(url.replaceAll('&amp;', '&'))) return match;
     blocked.push(url);
     return '';
   });
@@ -4694,7 +4703,7 @@ function deckVideoAssets(deckDir: string, deck: Deck): string[] {
   const seen = new Set<string>();
   for (const slide of deck.slides) {
     for (const element of slide.elements) {
-      if (element.type !== 'video') continue;
+      if (element.type !== 'video' || isLinkedMediaSrc(element.src)) continue;
       try {
         const absolute = resolveAsset(deckDir, element.src);
         if (isVideoAsset(absolute) && existsSync(absolute)) seen.add(absolute);

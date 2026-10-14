@@ -16,6 +16,7 @@ import { arrowHeadSize, shapeSvg } from '@shared/shapeSvg.js';
 import {
   applyStageScale,
   fitAutoTextElement,
+  pauseVideoEmbeds,
   renderSlide,
   videoPresentationKey,
 } from './render.js';
@@ -1220,6 +1221,9 @@ export class Player {
       if (!node) continue;
 
       if (el.type !== 'video') continue;
+      // A YouTube or Vimeo player is started by the presenter; the deck only
+      // stops it, when a build hides it or the screen is blanked.
+      if (!state.visible.has(el.id) || this.blanked) pauseVideoEmbeds(node);
       const video = node.querySelector('video');
       if (!video) continue;
 
@@ -1504,6 +1508,7 @@ export class Player {
     for (const video of this.stage.querySelectorAll('video')) {
       if (this.blanked) video.pause();
     }
+    if (this.blanked) pauseVideoEmbeds(this.stage);
     if (!this.blanked) {
       const slide = this.deck.slides[this.cursor.slide];
       if (slide) this.applyState(slide, resolveState(slide, this.cursor.step));
@@ -1700,6 +1705,15 @@ const BLUR_RADIUS = 24;
  * frame behind. A canvas holding the current frame fades out as the picture.
  */
 function freezeClonedVideos(source: HTMLElement, clone: HTMLElement): void {
+  // A cloned YouTube or Vimeo frame would load a second, live player for the
+  // length of the animation; the ghost shows the embed's still instead.
+  for (const frame of clone.querySelectorAll<HTMLIFrameElement>('iframe.video-embed-frame')) {
+    const still = frame.closest<HTMLElement>('.video-embed-body')?.dataset.embedStill;
+    const replacement = document.createElement(still ? 'img' : 'div');
+    if (replacement instanceof HTMLImageElement && still) replacement.src = still;
+    replacement.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+    frame.replaceWith(replacement);
+  }
   const live = source.querySelectorAll('video');
   const copies = clone.querySelectorAll('video');
   for (let i = 0; i < copies.length; i += 1) {

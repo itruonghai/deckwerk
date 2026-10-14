@@ -3403,7 +3403,8 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 }
 
 .workflow-dialog select,
-.workflow-dialog textarea {
+.workflow-dialog textarea,
+.workflow-dialog input.link-media-input {
   padding: 8px;
   border: 1px solid var(--line);
   background: var(--bg);
@@ -3420,6 +3421,9 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 
 .paste-theme-dialog { width: min(620px, calc(100vw - 48px)); }
 .confirm-dialog { width: min(440px, calc(100vw - 48px)); }
+.link-media-dialog { width: min(560px, calc(100vw - 48px)); }
+.link-media-status { margin: 0; line-height: 1.5; }
+.link-media-status.link-media-error { color: var(--danger); }
 .confirm-dialog-description { margin: 0; color: var(--text); line-height: 1.5; }
 .paste-theme-description { margin: 0; color: var(--text); }
 .paste-theme-detail { margin: 0; color: var(--muted); line-height: 1.6; }

@@ -26,6 +26,7 @@ import {
   type TextFormat,
 } from './textFormatting.js';
 import { showPasteThemeDialog } from './pasteThemeDialog.js';
+import { isLinkedMediaSrc, videoEmbedFor } from '@shared/linkedMedia.js';
 
 /**
  * Shell-independent wiring shared by the Electron editor and the browser
@@ -494,13 +495,18 @@ export function makeContextActions(
           }, { label: 'Reset to layout position' }),
         });
       }
-      if (el.type === 'image' || el.type === 'video') {
+      // Linked media is not a deck file, so the tools that read or rewrite the
+      // file are off; a YouTube or Vimeo player cannot be cropped, masked or
+      // played on the canvas at all (see renderVideoEmbed).
+      const linked = (el.type === 'image' || el.type === 'video') && isLinkedMediaSrc(el.src);
+      const embedded = el.type === 'video' && videoEmbedFor(el.src) !== null;
+      if ((el.type === 'image' || el.type === 'video') && !embedded) {
         items.push('separator', {
           label: canvas.maskingElement() === el.id ? 'Done editing mask' : 'Edit mask (crop)',
           action: () => canvas.toggleMaskMode(el.id),
         });
       }
-      if (el.type === 'image' || el.type === 'video') {
+      if ((el.type === 'image' || el.type === 'video') && !embedded) {
         items.push({
           label: el.maskShape === 'circle' ? 'Rectangular mask' : 'Circular mask',
           action: () => store.updateSelected((target) => {
@@ -514,11 +520,13 @@ export function makeContextActions(
           }, { label: 'Mask shape' }),
         });
       }
-      if (el.type === 'video') {
+      if (el.type === 'video' && !embedded) {
         items.push({
           label: canvas.isPlaying(el.id) ? 'Pause' : 'Play',
           action: () => void canvas.toggleVideo(el.id),
         });
+      }
+      if (el.type === 'video' && !linked) {
         if (openTrim) {
           items.push({ label: 'Edit w/ ffmpeg…', action: () => openTrim(el) });
         }
@@ -529,7 +537,7 @@ export function makeContextActions(
           action: () => void canvas.toggleWebLive(el.id),
         });
       }
-      if (el.type === 'image' && openRaster && !/\.pdf(?:$|[?#])/i.test(el.src)) {
+      if (el.type === 'image' && openRaster && !linked && !/\.pdf(?:$|[?#])/i.test(el.src)) {
         items.push({ label: 'Rasterize & paint…', action: () => openRaster(el) });
       }
       if (el.type === 'text' && sel === 1) {
@@ -590,3 +598,8 @@ export function barIconButton(label: string, iconSvg: string, onClick: () => voi
 export const TEXT_ICON =
   '<svg class="bar-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
   '<path d="M3 3.5V2.5h10v1M8 2.5v11M6 13.5h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+
+/** A chain link: Insert › Link… (media by web address). */
+export const LINK_ICON =
+  '<svg class="bar-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+  '<path d="M6.5 9.5l3-3M7 4.5l1.2-1.2a2.6 2.6 0 0 1 3.7 3.7L10.7 8.2M9 11.5l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7L5.3 7.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';

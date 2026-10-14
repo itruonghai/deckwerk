@@ -5,6 +5,7 @@ import { fitAutoTextElement } from './autoFit.js';
 import { KATEX_AUTO_RENDER_JS, KATEX_CSS, KATEX_JS } from './katexInline.js';
 import { shapeSvg } from './shapeSvg.js';
 import { applyTableColumnWidths } from './paragraphs.js';
+import { deckLinkedMedia } from './linkedMedia.js';
 import { layoutMaster, placeNewPlaceholders, syncSlideWithLayoutMaster, type FixedLayout } from './layoutMasters.js';
 import {
   cssMediaBorder,
@@ -1163,6 +1164,66 @@ const NON_TEXT_TAGS = new Set([
  * rename every element it touched.
  */
 export function slidesFromMeasured(deck: Deck, measured: MeasuredSlide[]): Slide[] {
+  const allowed = deckLinkedMedia(deck);
+  return compileSlidesFromMeasured(deck, measured).map((slide) => withoutUnlistedExternalMedia(slide, allowed));
+}
+
+/**
+ * Authored HTML cannot add a new external fetch to the deck. The sanitizers
+ * remove what they recognise, but a URL has many spellings (entities,
+ * protocol-relative `//`, `data-src` on a cropped object, CSS in a style
+ * attribute), so the slides compiled from the page are checked as well --
+ * here, the one place every compile path (editor, hosted server, CLI) goes
+ * through, after the browser has already read every spelling into a field.
+ *
+ * - An image or video whose src is a web address the deck does not already
+ *   link (`deckLinkedMedia`) is dropped; a linked poster not on the list is
+ *   cleared. Linked media is added in the editor (Link…), never by HTML.
+ * - A web address in a background image, in text or HTML-region markup, or
+ *   in an element's CSS is neutralised, as the sanitizers already intend.
+ */
+function withoutUnlistedExternalMedia(slide: Slide, allowed: ReadonlySet<string>): Slide {
+  // What the URL parser will fetch: it drops ASCII control characters and
+  // spaces, and reads a backslash as a slash, before it looks for a scheme.
+  const fetchable = (value: string): boolean => {
+    const url = value.replace(/[\u0000- ]/g, '').replaceAll('\\', '/');
+    return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url) && !/^(?:data|blob|deck):/i.test(url);
+  };
+  const scrubMarkup = (html: string): string => html
+    .replace(/(<[a-z][^>]*?)\s(src|poster|srcset|href|xlink:href)\s*=\s*(["'])([^"']*)\3/gi,
+      (match, open: string, attr: string, _quote: string, value: string) => {
+        // An anchor's href is a link a person clicks, not a fetch.
+        if (attr.toLowerCase() === 'href' && /^<a\b/i.test(open)) return match;
+        return fetchable(value) || (attr.toLowerCase() === 'srcset' && /(?:^|,)\s*(?:https?:|\/\/)/i.test(value))
+          ? open : match;
+      })
+    .replace(/url\(\s*(["']?)([^)'"]*)\1\s*\)/gi, (match, _quote: string, value: string) =>
+      (fetchable(value) ? 'none' : match));
+  const scrubCss = (css: string): string => css.replace(/url\(\s*(["']?)([^)'"]*)\1\s*\)/gi,
+    (match, _quote: string, value: string) => (fetchable(value) ? 'none' : match));
+  const unlisted = (src: string | null | undefined): boolean =>
+    typeof src === 'string' && fetchable(src) && !allowed.has(src);
+
+  const elements = slide.elements.filter((element) =>
+    !((element.type === 'image' || element.type === 'video') && unlisted(element.src)));
+  const removed = new Set(slide.elements.filter((element) => !elements.includes(element)).map((element) => element.id));
+  return {
+    ...slide,
+    background: unlisted(slide.background.image) ? { ...slide.background, image: null } : slide.background,
+    timeline: removed.size === 0 ? slide.timeline : slide.timeline.filter((entry) => !removed.has(entry.action.target)),
+    elements: elements.map((element) => {
+      const style = Object.fromEntries(Object.entries(element.style).map(([key, value]) => [key, scrubCss(value)]));
+      if (element.type === 'video' && unlisted(element.poster)) return { ...element, style, poster: null };
+      if (element.type === 'text') return { ...element, style, html: scrubMarkup(element.html) };
+      if (element.type === 'html') {
+        return { ...element, style, html: scrubMarkup(element.html), ...(element.css === undefined ? {} : { css: scrubCss(element.css) }) };
+      }
+      return { ...element, style };
+    }),
+  };
+}
+
+function compileSlidesFromMeasured(deck: Deck, measured: MeasuredSlide[]): Slide[] {
   const used = new Set(deck.slides.flatMap((slide) =>
     [slide.id, ...slide.elements.map((element) => element.id)]));
   for (const slide of measured) {

@@ -12,6 +12,7 @@ import {
 import { renameRetiredFields } from './fieldAliases.js';
 import { makeId } from './geometry.js';
 import type { ImportedAsset } from './ipc.js';
+import { isLinkedMediaSrc } from './linkedMedia.js';
 
 /**
  * Cross-instance clipboard payloads.
@@ -109,10 +110,11 @@ export function collectAssetSrcs(request: ClipboardWriteRequest): string[] {
   const srcs = new Set<string>();
   const fromElements = (elements: SlideElement[]) => {
     for (const el of elements) {
-      if (el.type === 'image') srcs.add(el.src);
+      // Linked media is an address, not a file to copy into the other deck.
+      if (el.type === 'image' && !isLinkedMediaSrc(el.src)) srcs.add(el.src);
       if (el.type === 'video') {
-        srcs.add(el.src);
-        if (el.poster) srcs.add(el.poster);
+        if (!isLinkedMediaSrc(el.src)) srcs.add(el.src);
+        if (el.poster && !isLinkedMediaSrc(el.poster)) srcs.add(el.poster);
       }
     }
   };
