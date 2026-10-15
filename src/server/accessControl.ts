@@ -219,7 +219,31 @@ function readLink(value: unknown): DeckAccess['link'] {
 }
 
 export async function writeDeckAccess(deckDir: string, access: DeckAccess): Promise<void> {
-  await writeFile(join(deckDir, ACCESS_FILE), `${JSON.stringify(access, null, 2)}\n`, 'utf8');
+  // Whole or not at all: a reader never sees half a sidecar, which would
+  // read as "corrupt", which reads as public.
+  const target = join(deckDir, ACCESS_FILE);
+  const staging = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(staging, `${JSON.stringify(access, null, 2)}\n`, 'utf8');
+  await rename(staging, target);
+}
+
+const accessLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Run a read-change-write of one deck's sidecar after every earlier one for
+ * that deck has finished. Two of them interleaved — the owner resetting the
+ * link while somebody opens it — would each write back what the other had
+ * just changed away.
+ */
+export function withDeckAccessLock<T>(deckDir: string, task: () => Promise<T>): Promise<T> {
+  const previous = accessLocks.get(deckDir) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  const settled = run.catch(() => undefined);
+  accessLocks.set(deckDir, settled);
+  void settled.then(() => {
+    if (accessLocks.get(deckDir) === settled) accessLocks.delete(deckDir);
+  });
+  return run;
 }
 
 /**

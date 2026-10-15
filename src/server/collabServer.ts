@@ -96,6 +96,7 @@ import {
   resolveIdentity,
   roleMayComment,
   UserDirectory,
+  withDeckAccessLock,
   writeDeckAccess,
   writeFolderOwner,
   ACCESS_FILE,
@@ -860,12 +861,14 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       return;
     }
     if (!isDeckDir(deckDir)) return;
-    const access = await readDeckAccess(deckDir, accessControl);
-    if (!access.link || !sameSecret(access.link.token, invite)) return;
-    if (deckRoleFor(identity, access, accessControl)) return;
-    await writeDeckAccess(deckDir, {
-      ...access,
-      sharedWith: normalizeShares([...access.sharedWith, { login: identity.login, role: access.link.role }]),
+    await withDeckAccessLock(deckDir, async () => {
+      const access = await readDeckAccess(deckDir, accessControl);
+      if (!access.link || !sameSecret(access.link.token, invite)) return;
+      if (deckRoleFor(identity, access, accessControl)) return;
+      await writeDeckAccess(deckDir, {
+        ...access,
+        sharedWith: normalizeShares([...access.sharedWith, { login: identity.login, role: access.link.role }]),
+      });
     });
   }
 
@@ -1707,102 +1710,137 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       const access = await readDeckAccess(deckDir, accessControl);
       const canManage = canManageDeck(identity.login, access, accessControl);
       if (request.method === 'GET') {
-        respondJson(response, 200, {
+        // Who else it is shared with, and the link secret, are the managers'
+        // business. Anyone else learns the owner, the general setting and
+        // their own role — what the dialog shows them.
+        respondJson(response, 200, canManage ? {
           ...access,
-          // The link is a secret of the people who manage the deck.
-          link: canManage ? access.link : null,
-          linkUrl: canManage ? deckLinkUrl(deckParam, access) : null,
+          linkUrl: deckLinkUrl(deckParam, access),
+          canManage,
+          role: deckRoleFor(identity, access, accessControl),
+        } : {
+          owner: access.owner,
+          visibility: access.visibility,
+          publicRole: access.publicRole,
+          sharedWith: access.sharedWith.filter((share) => share.login === identity.login),
+          link: null,
+          linkUrl: null,
           canManage,
           role: deckRoleFor(identity, access, accessControl),
         });
         return;
       }
       if (request.method === 'PUT' || request.method === 'POST') {
-        if (!canManage) {
-          return respondJson(response, 403, { error: 'only the deck owner or the admin can change access' });
-        }
-        let payload: {
-          visibility?: unknown; sharedWith?: unknown; owner?: unknown; publicRole?: unknown; link?: unknown;
-        };
-        try {
-          payload = JSON.parse((await readBody(request)).toString('utf8') || '{}') as typeof payload;
-        } catch {
-          return respondJson(response, 400, { error: 'body must be JSON' });
-        }
-        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          return respondJson(response, 400, { error: 'body must be a JSON object' });
-        }
-        const next: DeckAccess = { ...access };
-        if (payload.visibility !== undefined) {
-          if (payload.visibility !== 'public' && payload.visibility !== 'private') {
-            return respondJson(response, 400, { error: 'visibility must be "public" or "private"' });
+        const rawBody = await readBody(request);
+        // Read, change and write the sidecar as one step per deck: someone
+        // opening the deck's link at this moment adds themselves to the same
+        // file, and either change must not undo the other.
+        return withDeckAccessLock(deckDir, async () => {
+          const access = await readDeckAccess(deckDir, accessControl);
+          const canManage = canManageDeck(identity.login, access, accessControl);
+          if (!canManage) {
+            return respondJson(response, 403, { error: 'only the deck owner or the admin can change access' });
           }
-          next.visibility = payload.visibility;
-        }
-        if (payload.publicRole !== undefined) {
-          if (payload.publicRole !== 'edit' && payload.publicRole !== 'view') {
-            return respondJson(response, 400, { error: 'publicRole must be "edit" or "view"' });
+          let payload: {
+            visibility?: unknown; sharedWith?: unknown; sharedWithBase?: unknown;
+            owner?: unknown; publicRole?: unknown; link?: unknown;
+          };
+          try {
+            payload = JSON.parse(rawBody.toString('utf8') || '{}') as typeof payload;
+          } catch {
+            return respondJson(response, 400, { error: 'body must be JSON' });
           }
-          next.publicRole = payload.publicRole;
-        }
-        if (payload.sharedWith !== undefined) {
-          // Entries are `{ login, role }`; a bare login still means edit, so
-          // an older client PUTting back what it read stays correct.
-          const rows = payload.sharedWith;
-          const wellFormed = Array.isArray(rows) && rows.length <= 500 && rows.every((entry) =>
-            typeof entry === 'string'
-            || (Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry)
-              && typeof (entry as { login?: unknown }).login === 'string'
-              && ['edit', 'view', undefined].includes((entry as { role?: unknown }).role as string)));
-          if (!wellFormed) {
-            return respondJson(response, 400, {
-              error: 'sharedWith must be an array of logins or { login, role } entries',
-            });
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return respondJson(response, 400, { error: 'body must be a JSON object' });
           }
-          next.sharedWith = normalizeShares(rows);
-        }
-        if (payload.link !== undefined) {
-          // 'on' keeps an existing secret (so a link already sent still works),
-          // 'reset' retires it for a new one, 'off' retires it.
-          if (payload.link !== 'on' && payload.link !== 'off' && payload.link !== 'reset') {
-            return respondJson(response, 400, { error: 'link must be "on", "off" or "reset"' });
+          const next: DeckAccess = { ...access };
+          if (payload.visibility !== undefined) {
+            if (payload.visibility !== 'public' && payload.visibility !== 'private') {
+              return respondJson(response, 400, { error: 'visibility must be "public" or "private"' });
+            }
+            next.visibility = payload.visibility;
           }
-          next.link = payload.link === 'off'
-            ? null
-            : payload.link === 'on' && access.link ? access.link : { token: newLinkToken(), role: 'view' };
-        }
-        if (payload.owner !== undefined) {
-          // Transferring ownership is an admin act: an owner "giving a deck
-          // away" by typo would silently lock themselves out.
-          if (identity.login !== accessControl.admin) {
-            return respondJson(response, 403, { error: 'only the admin can transfer ownership' });
+          if (payload.publicRole !== undefined) {
+            if (payload.publicRole !== 'edit' && payload.publicRole !== 'view') {
+              return respondJson(response, 400, { error: 'publicRole must be "edit" or "view"' });
+            }
+            next.publicRole = payload.publicRole;
           }
-          if (typeof payload.owner !== 'string' || !normalizeLogin(payload.owner)) {
-            return respondJson(response, 400, { error: 'owner must be a login' });
+          if (payload.sharedWith !== undefined) {
+            // Entries are `{ login, role }`; a bare login still means edit, so
+            // an older client PUTting back what it read stays correct.
+            const rows = payload.sharedWith;
+            const wellFormed = Array.isArray(rows) && rows.length <= 500 && rows.every((entry) =>
+              typeof entry === 'string'
+              || (Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry)
+                && typeof (entry as { login?: unknown }).login === 'string'
+                && ['edit', 'view', undefined].includes((entry as { role?: unknown }).role as string)));
+            if (!wellFormed) {
+              return respondJson(response, 400, {
+                error: 'sharedWith must be an array of logins or { login, role } entries',
+              });
+            }
+            const submitted = normalizeShares(rows);
+            if (payload.sharedWithBase === undefined) {
+              next.sharedWith = submitted;
+            } else {
+              // The list the dialog started from: apply only what the person
+              // changed against it. Someone added meanwhile — opening the
+              // deck's link while the dialog was open — is kept, not dropped
+              // for being absent from a list read before they joined.
+              if (!Array.isArray(payload.sharedWithBase) || payload.sharedWithBase.length > 500) {
+                return respondJson(response, 400, { error: 'sharedWithBase must be the list the change started from' });
+              }
+              const removed = new Set(normalizeShares(payload.sharedWithBase).map((share) => share.login)
+                .filter((login) => !submitted.some((share) => share.login === login)));
+              const kept = access.sharedWith.filter((share) =>
+                !removed.has(share.login) && !submitted.some((entry) => entry.login === share.login));
+              next.sharedWith = [...submitted, ...kept];
+            }
           }
-          next.owner = normalizeLogin(payload.owner);
-        }
-        await writeDeckAccess(deckDir, next);
-        // A socket was admitted under the old sidecar; the new one has to
-        // apply to it too, or un-sharing would only stop the *next* visit.
-        // Demotion to view-only counts: that peer is sitting in an editor
-        // whose every transaction the server would now refuse, so it is sent
-        // back to reload into the read-only page.
-        for (const peer of rooms.get(deckParam)?.peers.values() ?? []) {
-          if (!peer.identity) continue;
-          if (!canAccessDeck(peer.identity, next, accessControl)) {
-            peer.socket.close(4003, 'your access to this deck was revoked');
-          } else if (peer.canEdit && !canEditDeck(peer.identity, next, accessControl)) {
-            peer.socket.close(4003, 'your access to this deck is now view-only — reload to keep watching');
+          if (payload.link !== undefined) {
+            // 'on' keeps an existing secret (so a link already sent still works),
+            // 'reset' retires it for a new one, 'off' retires it.
+            if (payload.link !== 'on' && payload.link !== 'off' && payload.link !== 'reset') {
+              return respondJson(response, 400, { error: 'link must be "on", "off" or "reset"' });
+            }
+            next.link = payload.link === 'off'
+              ? null
+              : payload.link === 'on' && access.link ? access.link : { token: newLinkToken(), role: 'view' };
           }
-        }
-        respondJson(response, 200, {
-          ...next,
-          linkUrl: deckLinkUrl(deckParam, next),
-          canManage: canManageDeck(identity.login, next, accessControl),
-          role: deckRoleFor(identity, next, accessControl),
+          if (payload.owner !== undefined) {
+            // Transferring ownership is an admin act: an owner "giving a deck
+            // away" by typo would silently lock themselves out.
+            if (identity.login !== accessControl.admin) {
+              return respondJson(response, 403, { error: 'only the admin can transfer ownership' });
+            }
+            if (typeof payload.owner !== 'string' || !normalizeLogin(payload.owner)) {
+              return respondJson(response, 400, { error: 'owner must be a login' });
+            }
+            next.owner = normalizeLogin(payload.owner);
+          }
+          await writeDeckAccess(deckDir, next);
+          // A socket was admitted under the old sidecar; the new one has to
+          // apply to it too, or un-sharing would only stop the *next* visit.
+          // Demotion to view-only counts: that peer is sitting in an editor
+          // whose every transaction the server would now refuse, so it is sent
+          // back to reload into the read-only page.
+          for (const peer of rooms.get(deckParam)?.peers.values() ?? []) {
+            if (!peer.identity) continue;
+            if (!canAccessDeck(peer.identity, next, accessControl)) {
+              peer.socket.close(4003, 'your access to this deck was revoked');
+            } else if (peer.canEdit && !canEditDeck(peer.identity, next, accessControl)) {
+              peer.socket.close(4003, 'your access to this deck is now view-only — reload to keep watching');
+            }
+          }
+          respondJson(response, 200, {
+            ...next,
+            linkUrl: deckLinkUrl(deckParam, next),
+            canManage: canManageDeck(identity.login, next, accessControl),
+            role: deckRoleFor(identity, next, accessControl),
+          });
+          return;
         });
-        return;
       }
       return respondJson(response, 405, { error: 'method not allowed' });
     }
@@ -2358,7 +2396,10 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       await rooms.get(deckParam)?.session.flush();
       // The edit log stays on the server: it names everyone who edited the
       // deck and keeps what they deleted, and an import drops it anyway.
-      const files = (await collectDeckFiles(deckDir)).filter((file) => !HISTORY_FILES.includes(file.name));
+      // Nor do the permission sidecars: they hold who it is shared with and
+      // the deck's link secret, which are the deck managers' to give out.
+      const files = (await collectDeckFiles(deckDir)).filter((file) =>
+        !HISTORY_FILES.includes(file.name) && file.name !== ACCESS_FILE && file.name !== FOLDER_FILE);
       response.writeHead(200, {
         'content-type': 'application/zip',
         'cache-control': 'no-store',

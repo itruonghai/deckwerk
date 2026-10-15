@@ -1209,6 +1209,9 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
           visibility: visibility.value,
           publicRole: publicRole.value,
           sharedWith: shares.map((share) => ({ ...share })),
+          // What the list was when the dialog opened, so the server applies
+          // only this person's changes to it (see /api/access).
+          sharedWithBase: info.sharedWith,
         };
         const saved = await fetch(`/api/access?deck=${encodeURIComponent(deckId)}`, {
           method: 'PUT',

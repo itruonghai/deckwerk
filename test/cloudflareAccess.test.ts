@@ -291,6 +291,70 @@ describe('collab server Cloudflare Access door', () => {
     expect((await put({ link: 'off' })).body.linkUrl).toBeNull();
   });
 
+  it('keeps the link secret and the other members from people who do not manage the deck', async () => {
+    const port = server.cloudflarePort!;
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=for-prof`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((response) => response.json() as Promise<any>);
+    const { linkUrl } = await put({ link: 'on', sharedWith: [{ login: PROF, role: 'view' }, { login: 'other@x.example', role: 'edit' }] });
+    const token = new URL(linkUrl).searchParams.get('invite')!;
+
+    const seen = (await get(port, '/api/access?deck=for-prof', as(PROF))).body;
+    expect(seen.sharedWith).toEqual([{ login: PROF, role: 'view' }]);
+    expect(JSON.stringify(seen)).not.toContain(token);
+
+    const zip = Buffer.from(await (await fetch(`http://127.0.0.1:${port}/api/download?deck=for-prof`, { headers: as(PROF) })).arrayBuffer());
+    expect(zip.length).toBeGreaterThan(0);
+    expect(zip.includes('access.json')).toBe(false);
+    expect(zip.includes(token)).toBe(false);
+  });
+
+  it('never lets a redemption and an owner change undo each other', async () => {
+    const port = server.cloudflarePort!;
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=private`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((response) => response.json() as Promise<any>);
+    const first = new URL((await put({ link: 'on' })).linkUrl).searchParams.get('invite')!;
+    const guests = Array.from({ length: 8 }, (_, i) => `guest${i}@x.example`);
+    const [, ...redeemed] = await Promise.all([
+      put({ link: 'on' }),
+      ...guests.map((guest) => get(port, `/api/deck?deck=private&invite=${first}`, as(guest))),
+    ]);
+    expect(redeemed.every((result) => result.status === 200)).toBe(true);
+    const after = (await get(server.port, '/api/access?deck=private')).body;
+    for (const guest of guests) expect(after.sharedWith).toContainEqual({ login: guest, role: 'view' });
+
+    // A reset racing more redemptions: whatever lands, the retired secret stays retired.
+    const [reset] = await Promise.all([
+      put({ link: 'reset' }),
+      ...['a', 'b', 'c'].map((n) => get(port, `/api/deck?deck=private&invite=${first}`, as(`${n}@late.example`))),
+    ]);
+    const final = (await get(server.port, '/api/access?deck=private')).body;
+    expect(final.linkUrl).toBe(reset.linkUrl);
+    expect(final.link.token).not.toBe(first);
+  });
+
+  it('applies a Share dialog save as changes, keeping people who joined meanwhile', async () => {
+    const port = server.cloudflarePort!;
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=for-prof`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((response) => response.json() as Promise<any>);
+    const opened = (await get(server.port, '/api/access?deck=for-prof')).body;
+    const token = new URL((await put({ link: 'on' })).linkUrl).searchParams.get('invite')!;
+    await get(port, `/api/deck?deck=for-prof&invite=${token}`, as('joined@x.example'));
+    // The dialog, opened before that, promotes the professor and adds someone.
+    const saved = await put({
+      sharedWith: [{ login: PROF, role: 'edit' }, { login: 'added@x.example', role: 'view' }],
+      sharedWithBase: opened.sharedWith,
+    });
+    expect(saved.sharedWith).toEqual(expect.arrayContaining([
+      { login: PROF, role: 'edit' }, { login: 'added@x.example', role: 'view' }, { login: 'joined@x.example', role: 'view' },
+    ]));
+    // Removing someone the dialog did list still removes them.
+    const removed = await put({ sharedWith: [], sharedWithBase: saved.sharedWith.filter((s: any) => s.login === PROF) });
+    expect(removed.sharedWith.map((s: any) => s.login).sort()).toEqual(['added@x.example', 'joined@x.example']);
+  });
+
   it('never demotes someone who already has more than the link gives', async () => {
     const port = server.cloudflarePort!;
     await writeFile(join(rootDir, 'for-prof', 'access.json'), JSON.stringify({

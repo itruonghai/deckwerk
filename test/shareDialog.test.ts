@@ -141,6 +141,8 @@ describe('share dialog', () => {
       visibility: 'public',
       publicRole: 'view',
       sharedWith: [{ login: BOB, role: 'edit' }],
+      // The list as the dialog found it: the server applies only the changes.
+      sharedWithBase: [{ login: BOB, role: 'edit' }],
     });
   });
 
