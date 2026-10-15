@@ -866,7 +866,9 @@ interface DeckAccessInfo {
   canManage: boolean;
   role: 'owner' | 'edit' | 'view' | null;
   /** "Anyone with the link can view" is on (only told to people who manage the deck). */
-  link?: { role: 'view' } | null;
+  link?: { role: 'view'; anyone?: boolean } | null;
+  /** The server has a no-sign-in view-link address, so `anyone` links can work. */
+  anyoneLinks?: boolean;
   /** That link, when on; relative unless the server knows its public address. */
   linkUrl?: string | null;
 }
@@ -1122,14 +1124,19 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
     // viewer. Switched on and off straight away rather than on Save, so the
     // link can be copied the moment it exists.
     let linkUrl = info.linkUrl ?? null;
+    let linkAnyone = info.link?.anyone === true;
     const linkRow = document.createElement('div');
     linkRow.className = 'share-dialog-general share-dialog-link';
     const linkMode = document.createElement('select');
-    for (const [value, label] of [['off', 'Off'], ['on', 'Anyone with the link can view']] as const) {
+    const modes: Array<readonly ['off' | 'on' | 'anyone', string]> = [
+      ['off', 'Off'],
+      ['on', 'Anyone with the link can view, after signing in'],
+      ...(info.anyoneLinks ? [['anyone', 'Anyone with the link can view, no sign-in'] as const] : []),
+    ];
+    for (const [value, label] of modes) {
       const option = document.createElement('option');
       option.value = value;
       option.textContent = label;
-      option.selected = (linkUrl !== null) === (value === 'on');
       linkMode.append(option);
     }
     linkMode.title = 'Let people open this presentation, view-only, with a secret link';
@@ -1141,14 +1148,17 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
     const linkNote = document.createElement('p');
     linkNote.className = 'share-dialog-note';
     const syncLink = () => {
-      linkMode.value = linkUrl ? 'on' : 'off';
+      linkMode.value = !linkUrl ? 'off' : linkAnyone ? 'anyone' : 'on';
       resetLink.hidden = !linkUrl;
-      linkNote.textContent = linkUrl
-        ? 'Whoever opens the link signs in with their email and is added above as a viewer. '
-          + 'Remove anyone there; reset the link to stop it working.'
-        : 'Only the people listed above can open it with a link.';
+      linkNote.textContent = !linkUrl
+        ? 'Only the people listed above can open it with a link.'
+        : linkAnyone
+          ? 'Anyone who has the link can watch it, view-only, without signing in — and sees your changes live. '
+            + 'Reset the link or turn it off to stop it working, even for people watching right now.'
+          : 'Whoever opens the link signs in with their email and is added above as a viewer. '
+            + 'Remove anyone there; reset the link to stop it working.';
     };
-    const setLink = async (mode: 'on' | 'off' | 'reset') => {
+    const setLink = async (mode: 'on' | 'anyone' | 'off' | 'reset') => {
       linkMode.disabled = true;
       resetLink.disabled = true;
       try {
@@ -1157,9 +1167,10 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ link: mode }),
         });
-        const result = await saved.json() as { error?: string; linkUrl?: string | null };
+        const result = await saved.json() as { error?: string; linkUrl?: string | null; link?: { anyone?: boolean } | null };
         if (!saved.ok) throw new Error(result.error ?? `link change failed (${saved.status})`);
         linkUrl = result.linkUrl ?? null;
+        linkAnyone = result.link?.anyone === true;
         onStatus(mode === 'off' ? 'Link sharing is off' : mode === 'reset' ? 'Made a new link; the old one no longer works'
           : 'Anyone with the link can view — Copy link to send it');
       } catch (error) {
@@ -1170,7 +1181,9 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
         syncLink();
       }
     };
-    linkMode.addEventListener('change', () => void setLink(linkMode.value === 'on' ? 'on' : 'off'));
+    linkMode.addEventListener('change', () => {
+      void setLink(linkMode.value === 'anyone' ? 'anyone' : linkMode.value === 'on' ? 'on' : 'off');
+    });
     resetLink.addEventListener('click', () => void setLink('reset'));
     syncLink();
 

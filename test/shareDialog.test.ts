@@ -34,7 +34,12 @@ async function openDialog(access: Partial<typeof ACCESS> = {}): Promise<{ status
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const sent = init?.method === 'PUT' ? JSON.parse(String(init.body)) as { link?: string } : null;
     const json = input.startsWith('/api/users') ? USERS
-      : sent?.link ? { linkUrl: sent.link === 'off' ? null : `https://slides.example.com/?deck=talk&invite=${sent.link}-secret` }
+      : sent?.link ? {
+        linkUrl: sent.link === 'off' ? null
+          : sent.link === 'anyone' ? `https://view.example.com/?deck=talk&view=${sent.link}-secret`
+            : `https://slides.example.com/?deck=talk&invite=${sent.link}-secret`,
+        link: sent.link === 'off' ? null : { role: 'view', anyone: sent.link === 'anyone' },
+      }
         : sent ? {}
           : info;
     return new Response(JSON.stringify(json), {
@@ -202,5 +207,26 @@ describe('share dialog', () => {
     await vi.waitFor(() => expect(status.at(-1)).toMatch(/old one no longer works/));
     copy.click();
     await vi.waitFor(() => expect(written.at(-1)).toBe('https://slides.example.com/?deck=talk&invite=reset-secret'));
+  });
+
+  it('offers a no-sign-in link only when the server has a view-link address', async () => {
+    await openDialog();
+    const options = () => [...document.querySelectorAll<HTMLOptionElement>('.share-dialog-link select option')].map((o) => o.value);
+    expect(options()).toEqual(['off', 'on']);
+
+    document.body.innerHTML = '';
+    const written: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async (text: string) => void written.push(text) } });
+    await openDialog({ anyoneLinks: true } as Partial<typeof ACCESS>);
+    expect(options()).toEqual(['off', 'on', 'anyone']);
+    const mode = document.querySelector<HTMLSelectElement>('.share-dialog-link select')!;
+    mode.value = 'anyone';
+    mode.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(document.querySelector('.share-dialog-link + .share-dialog-note, .share-dialog-section:last-child .share-dialog-note')?.textContent)
+      .toMatch(/without signing in/));
+    const put = vi.mocked(fetch).mock.calls.filter((call) => call[1]?.method === 'PUT').at(-1)!;
+    expect(JSON.parse(String(put[1]!.body))).toEqual({ link: 'anyone' });
+    document.querySelector<HTMLButtonElement>('.share-dialog-copy')!.click();
+    await vi.waitFor(() => expect(written).toEqual(['https://view.example.com/?deck=talk&view=anyone-secret']));
   });
 });

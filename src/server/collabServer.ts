@@ -6,7 +6,7 @@ import { lookup } from 'node:dns/promises';
 import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { createServer as createNetServer, isIP, type Server as NetServer, type Socket } from 'node:net';
@@ -89,6 +89,7 @@ import {
   deckRoleFor,
   folderVisibleTo,
   isGuest,
+  sameSecret,
   normalizeLogin,
   normalizeShares,
   readDeckAccess,
@@ -114,6 +115,7 @@ import {
   type CloudflareAccessConfig,
   type CloudflareAccessVerifier,
 } from './cloudflareAccess.js';
+import { admitViewRequest, admitViewSocket, isViewLinkRequest } from './viewLinks.js';
 
 /** How long shutdown lets peers finish the WebSocket close handshake. */
 const SOCKET_CLOSE_GRACE_MS = 500;
@@ -331,6 +333,13 @@ export interface CollabServerOptions {
    */
   cloudflareAccess?: CloudflareAccessConfig & { port: number; publicUrl?: string; verifier?: CloudflareAccessVerifier };
   /**
+   * The view-link door (viewLinks.ts): a loopback listener on `port` for a
+   * tunnel hostname with no sign-in, where a deck's "anyone" link opens that
+   * deck view-only. `publicUrl` is that hostname; links are written on it.
+   * Needs `accessControl`.
+   */
+  viewLinks?: { port: number; publicUrl?: string };
+  /**
    * Called when the host requests the session end (POST /api/end from
    * loopback in a hosted session). The owner tears the server down; the
    * endpoint itself only notifies peers.
@@ -357,6 +366,8 @@ export interface RunningCollabServer {
   port: number;
   /** The Cloudflare Tunnel listener's port, when `cloudflareAccess` is set. */
   cloudflarePort?: number;
+  /** The view-link listener's port, when `viewLinks` is set. */
+  viewPort?: number;
   /** Persist every room immediately instead of waiting for its save debounce. */
   flush: () => Promise<void>;
   /** Tell connected peers this was an intentional host end, not a network loss. */
@@ -430,6 +441,12 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   if (options.cloudflareAccess && !accessControl) {
     throw new Error('cloudflareAccess needs accessControl: without it there is nobody to check the token for');
   }
+  if (options.viewLinks && !accessControl) {
+    throw new Error('viewLinks needs accessControl: without it a link would open everything');
+  }
+  /** Came in through the internet-facing listeners (Cloudflare, view links), not the tailnet. */
+  const throughTunnel = (request: IncomingMessage): boolean =>
+    isCloudflareRequest(request) || isViewLinkRequest(request);
   const cloudflare = options.cloudflareAccess
     ? options.cloudflareAccess.verifier ?? createCloudflareAccessVerifier(options.cloudflareAccess)
     : null;
@@ -841,9 +858,12 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
    */
   const deckLinkUrl = (deckId: string, access: DeckAccess): string | null => {
     if (!access.link) return null;
-    const query = `?deck=${encodeURIComponent(deckId)}&invite=${access.link.token}`;
+    if (access.link.anyone) {
+      const base = options.viewLinks?.publicUrl?.replace(/\/+$/, '') ?? '';
+      return `${base}/?deck=${encodeURIComponent(deckId)}&view=${access.link.token}`;
+    }
     const base = options.cloudflareAccess?.publicUrl?.replace(/\/+$/, '') ?? '';
-    return `${base}/${query}`;
+    return `${base}/?deck=${encodeURIComponent(deckId)}&invite=${access.link.token}`;
   };
 
   /**
@@ -1185,7 +1205,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   // by curl and node from a terminal, which never holds their browser's
   // Cloudflare sign-in, so the command the panel offers could not work.
   const canUseSharedAgent = (request: IncomingMessage): boolean =>
-    Boolean(sharedAgent) && !isCloudflareRequest(request);
+    Boolean(sharedAgent) && !throughTunnel(request);
 
   const agentChatId = (deckId: string, participantId: string | null): string | null => {
     if (sharedAgent && participantId) return sharedAgent.chatId(deckDirOf(deckId), participantId);
@@ -1435,21 +1455,29 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     // every ?deck=-scoped route; the asset route and the WebSocket upgrade
     // carry the deck id elsewhere and repeat the deck check themselves.
     if (cloudflare && isCloudflareRequest(request)) await cloudflare.admit(request);
+    if (options.viewLinks && isViewLinkRequest(request)) {
+      const { setCookie } = admitViewRequest(request, url);
+      if (setCookie) response.setHeader('set-cookie', setCookie);
+    }
     const identity = accessControl ? resolveIdentity(request, accessControl) : null;
     if (accessControl && !identity) {
       return respondJson(response, 403, {
-        error: isCloudflareRequest(request)
-          ? 'not signed in — open this server through its Cloudflare Access address'
-          : 'unidentified connection — this server is reachable only through tailscale serve',
+        error: isViewLinkRequest(request)
+          ? 'This link does not open anything. It may have been turned off or replaced; ask for a new one.'
+          : isCloudflareRequest(request)
+            ? 'not signed in — open this server through its Cloudflare Access address'
+            : 'unidentified connection — this server is reachable only through tailscale serve',
       });
     }
-    if (identity && userDirectory) void userDirectory.note(identity);
+    // A link viewer is nobody in particular: not a person to remember.
+    if (identity && userDirectory && !identity.linkTokens) void userDirectory.note(identity);
 
     // A guest from the internet (the Cloudflare door) works only inside decks
     // shared with them. Everything that reaches beyond one deck — creating,
     // importing, moving, the trash, the list of everyone on this server — is
     // for the people on the tailnet.
-    if (accessControl && identity && isGuest(identity, accessControl) && guestForbidden(path, request.method ?? 'GET')) {
+    if (accessControl && identity && isGuest(identity, accessControl)
+      && guestForbidden(path, request.method ?? 'GET', Boolean(identity.linkTokens))) {
       return respondJson(response, 403, { error: 'guests can open what is shared with them, but not this' });
     }
 
@@ -1477,7 +1505,10 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     // makes this person a named viewer, so every later request — and the
     // owner's Share… list — knows them like anyone shared by email.
     const invite = url.searchParams.get('invite');
-    if (accessControl && identity && deckParam && invite) await redeemDeckLink(identity, deckParam, invite);
+    // (A link viewer is nobody to name, so never joins anything.)
+    if (accessControl && identity && !identity.linkTokens && deckParam && invite) {
+      await redeemDeckLink(identity, deckParam, invite);
+    }
     if (deckParam && !(await deckAllowed(identity, deckParam))) {
       return respondJson(response, 403, { error: 'you do not have access to this deck' });
     }
@@ -1716,6 +1747,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
         respondJson(response, 200, canManage ? {
           ...access,
           linkUrl: deckLinkUrl(deckParam, access),
+          anyoneLinks: Boolean(options.viewLinks),
           canManage,
           role: deckRoleFor(identity, access, accessControl),
         } : {
@@ -1809,14 +1841,20 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
             }
           }
           if (payload.link !== undefined) {
-            // 'on' keeps an existing secret (so a link already sent still works),
-            // 'reset' retires it for a new one, 'off' retires it.
-            if (payload.link !== 'on' && payload.link !== 'off' && payload.link !== 'reset') {
-              return respondJson(response, 400, { error: 'link must be "on", "off" or "reset"' });
+            // 'on' (sign in first) and 'anyone' (no sign-in) keep an existing
+            // secret, so a link already sent keeps working wherever the new
+            // setting allows it; 'reset' retires it for a new one in the same
+            // mode; 'off' retires it.
+            const mode = payload.link;
+            if (mode !== 'on' && mode !== 'anyone' && mode !== 'off' && mode !== 'reset') {
+              return respondJson(response, 400, { error: 'link must be "on", "anyone", "off" or "reset"' });
             }
-            next.link = payload.link === 'off'
-              ? null
-              : payload.link === 'on' && access.link ? access.link : { token: newLinkToken(), role: 'view' };
+            if (mode === 'anyone' && !options.viewLinks) {
+              return respondJson(response, 400, { error: 'this server has no view-link address (--view-port)' });
+            }
+            next.link = mode === 'off' ? null
+              : mode === 'reset' ? { token: newLinkToken(), role: 'view', anyone: access.link?.anyone ?? false }
+                : { token: access.link?.token ?? newLinkToken(), role: 'view', anyone: mode === 'anyone' };
           }
           if (payload.owner !== undefined) {
             // Transferring ownership is an admin act: an owner "giving a deck
@@ -1832,7 +1870,8 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           await writeDeckAccess(deckDir, next);
           // A socket was admitted under the old sidecar; the new one has to
           // apply to it too, or un-sharing would only stop the *next* visit.
-          // Demotion to view-only counts: that peer is sitting in an editor
+          // A link viewer whose link was turned off, reset or made sign-in-only
+          // is closed by the same check. Demotion to view-only counts: that peer is sitting in an editor
           // whose every transaction the server would now refuse, so it is sent
           // back to reload into the read-only page.
           for (const peer of rooms.get(deckParam)?.peers.values() ?? []) {
@@ -1846,6 +1885,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           respondJson(response, 200, {
             ...next,
             linkUrl: deckLinkUrl(deckParam, next),
+            anyoneLinks: Boolean(options.viewLinks),
             canManage: canManageDeck(identity.login, next, accessControl),
             role: deckRoleFor(identity, next, accessControl),
           });
@@ -2479,7 +2519,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       const remote = request.socket.remoteAddress ?? '';
       const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
       // The tunnel daemon is loopback too; nobody through it is the host.
-      if (!hostedDeckId || !loopback || isCloudflareRequest(request)) {
+      if (!hostedDeckId || !loopback || throughTunnel(request)) {
         return respondJson(response, 403, { error: 'only the host can end the session' });
       }
       for (const room of rooms.values()) broadcast(room, { kind: 'ended' });
@@ -3665,6 +3705,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       let canComment = true;
       if (accessControl) {
         if (cloudflare && isCloudflareRequest(request)) await cloudflare.admit(request);
+        if (options.viewLinks && isViewLinkRequest(request)) admitViewRequest(request, url);
         identity = resolveIdentity(request, accessControl);
         const role = identity ? await deckRoleOf(identity, deckId) : null;
         if (!identity || !role) {
@@ -3676,7 +3717,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
         }
         canEdit = role !== 'view';
         canComment = roleMayComment(role);
-        if (userDirectory) void userDirectory.note(identity);
+        if (userDirectory && !identity.linkTokens) void userDirectory.note(identity);
       }
       // A rename of this very deck may be landing right now; let it, then
       // look at what is on disk. A missing deck is answered here rather than
@@ -3907,40 +3948,46 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   });
   boundPort = port;
 
-  // The Cloudflare Tunnel's own door. Its connections are handed to the same
-  // HTTP server, so every route and the WebSocket behave exactly as on the
-  // main port; only the identity rule differs, by which listener accepted it.
-  let cloudflareServer: NetServer | null = null;
-  const cloudflareConnections = new Set<Socket>();
-  let cloudflarePort: number | undefined;
-  if (options.cloudflareAccess) {
+  // The tunnel's own doors: the Cloudflare Access one and the view-link one.
+  // Their connections are handed to the same HTTP server, so every route and
+  // the WebSocket behave exactly as on the main port; only the identity rule
+  // differs, by which listener accepted it.
+  const doorServers: NetServer[] = [];
+  const doorConnections = new Set<Socket>();
+  const openDoor = async (doorPort: number, admitSocket: (socket: Socket) => void): Promise<number> => {
     const server = createNetServer((socket) => {
-      admitCloudflareSocket(socket);
-      cloudflareConnections.add(socket);
-      socket.once('close', () => cloudflareConnections.delete(socket));
+      admitSocket(socket);
+      doorConnections.add(socket);
+      socket.once('close', () => doorConnections.delete(socket));
       httpServer.emit('connection', socket);
     });
-    cloudflareServer = server;
+    doorServers.push(server);
     try {
-      cloudflarePort = await new Promise<number>((resolvePromise, reject) => {
+      return await new Promise<number>((resolvePromise, reject) => {
         server.once('error', reject);
         // Loopback only: the tunnel daemon runs on this machine.
-        server.listen(options.cloudflareAccess!.port, '127.0.0.1', () => {
+        server.listen(doorPort, '127.0.0.1', () => {
           const address = server.address();
-          resolvePromise(typeof address === 'object' && address ? address.port : options.cloudflareAccess!.port);
+          resolvePromise(typeof address === 'object' && address ? address.port : doorPort);
         });
       });
     } catch (error) {
+      for (const door of doorServers) door.close();
       httpServer.close();
       httpServer.closeAllConnections();
       throw error;
     }
-  }
+  };
+  const cloudflarePort = options.cloudflareAccess
+    ? await openDoor(options.cloudflareAccess.port, admitCloudflareSocket)
+    : undefined;
+  const viewPort = options.viewLinks ? await openDoor(options.viewLinks.port, admitViewSocket) : undefined;
   unsubscribeSharedAgent = sharedAgent?.subscribe(emitSharedAgentState);
 
   return {
     port,
     cloudflarePort,
+    viewPort,
     urls: reachableUrls(host, port),
     flush: async () => {
       await Promise.all([...rooms.values()].map((room) => room.session.flush()));
@@ -3988,10 +4035,10 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           httpServer.close(() => resolvePromise());
           httpServer.closeAllConnections();
         }),
-        cloudflareServer && new Promise<void>((resolvePromise) => {
-          cloudflareServer!.close(() => resolvePromise());
-          for (const socket of cloudflareConnections) socket.destroy();
-        }),
+        ...doorServers.map((door) => new Promise<void>((resolvePromise) => {
+          door.close(() => resolvePromise());
+          for (const socket of doorConnections) socket.destroy();
+        })),
       ]);
       for (const room of rooms.values()) await room.session.close();
       sharedAgent?.close();
@@ -5065,8 +5112,15 @@ const GUEST_FORBIDDEN_WRITES = new Set([
   '/api/import-keynote', '/api/import-pptx', '/api/import-deck',
 ]);
 
-function guestForbidden(path: string, method: string): boolean {
+/**
+ * What a link viewer may not do beyond a guest: take the deck away whole, or
+ * read what its people say to each other. They came to watch the slides.
+ */
+const LINK_VIEWER_FORBIDDEN = new Set(['/api/download', '/api/export/web', '/api/chat', '/api/access']);
+
+function guestForbidden(path: string, method: string, linkViewer = false): boolean {
   if (GUEST_FORBIDDEN_ANY.has(path)) return true;
+  if (linkViewer && LINK_VIEWER_FORBIDDEN.has(path)) return true;
   return method !== 'GET' && method !== 'HEAD' && GUEST_FORBIDDEN_WRITES.has(path);
 }
 
@@ -5075,8 +5129,3 @@ function newLinkToken(): string {
   return randomBytes(18).toString('base64url');
 }
 
-function sameSecret(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
-}

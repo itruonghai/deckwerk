@@ -479,9 +479,11 @@ if (embedded) {
 // screen (seeded or previously welcomed) a lost socket shows a pill and the
 // presentation keeps working from memory; with no deck yet, the notice owns
 // the page and says the server is unreachable.
+/** The server refused us — a view link turned off, access taken away. */
+let refused = false;
 const connectionNotice = createConnectionNotice({
   mode: 'present',
-  blocking: () => deck === null,
+  blocking: () => deck === null || refused,
 });
 
 const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?deck=${encodeURIComponent(deckId)}`;
@@ -515,6 +517,15 @@ const bridge = new CollabBridge(wsUrl, name ? `${name} (${label.toLowerCase()})`
   // audience is watching. Edits made from here on no longer reach this view.
   onMoved: () => {},
   onUnavailable: (reason) => connectionNotice.showEnded(reason),
+  // Access is gone, so is the deck: what was on screen does not stay up for
+  // someone who may no longer see it.
+  onRefused: (reason) => {
+    refused = true;
+    stageHost.replaceChildren();
+    connectionNotice.showEnded(reason.startsWith('your access')
+      ? 'You no longer have access to this presentation.'
+      : reason);
+  },
 });
 
 window.addEventListener('resize', () => speaker?.refresh());

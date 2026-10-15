@@ -34,11 +34,12 @@
  * otherwise entirely derived: see `folderVisibleTo`.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import { cloudflareIdentityOf, isCloudflareRequest } from './cloudflareAccess.js';
+import { isViewLinkRequest, viewIdentityOf } from './viewLinks.js';
 
 export interface AccessControlConfig {
   /** Tailnet login of the administrator; sees and manages every deck. */
@@ -56,6 +57,12 @@ export interface Identity {
    * the deck's link, never what "public" gives everyone on the tailnet.
    */
   external?: boolean;
+  /**
+   * A link viewer (viewLinks.ts): nobody in particular, holding these deck
+   * link secrets. Such an identity sees exactly the decks whose link is set
+   * to "anyone" with one of these secrets, view-only, and nothing else.
+   */
+  linkTokens?: string[];
 }
 
 /**
@@ -93,11 +100,14 @@ export interface DeckAccess {
   /** What `visibility: "public"` grants everyone else on the tailnet. */
   publicRole: AccessRole;
   /**
-   * "Anyone with the link can view": whoever opens the deck with this secret
-   * (`?invite=`) is added to `sharedWith` as a viewer, so they show up in
-   * Share… and can be removed there. Null when link sharing is off.
+   * "Anyone with the link can view". Null when link sharing is off.
+   * - `anyone: false`: whoever opens the deck with this secret (`?invite=`)
+   *   after signing in is added to `sharedWith` as a viewer, so they show
+   *   up in Share… and can be removed there.
+   * - `anyone: true`: also opens the deck, view-only, without signing in,
+   *   on the view-link door (`?view=`, viewLinks.ts).
    */
-  link: { token: string; role: 'view' } | null;
+  link: { token: string; role: 'view'; anyone: boolean } | null;
 }
 
 /** A deck's owner (or the admin) outranks both share roles. */
@@ -105,6 +115,13 @@ export type DeckRole = 'owner' | AccessRole;
 
 export const ACCESS_FILE = 'access.json';
 export const FOLDER_FILE = 'folder.json';
+
+/** Compare two secrets without the time it takes saying how much of them matched. */
+export function sameSecret(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
 
 export function normalizeLogin(value: string): string {
   return value.trim().toLowerCase();
@@ -133,6 +150,8 @@ export function resolveIdentity(
   // The tunnel daemon connects over loopback too, and passes through whatever
   // headers the visitor sent: only the token Cloudflare signed says who it is.
   if (isCloudflareRequest(request)) return cloudflareIdentityOf(request);
+  // Likewise the view-link door: link secrets, or nobody.
+  if (isViewLinkRequest(request)) return viewIdentityOf(request);
   if (!isLoopback(request)) return null;
   const login = headerValue(request, 'tailscale-user-login');
   if (login) {
@@ -216,7 +235,9 @@ function readLink(value: unknown): DeckAccess['link'] {
   if (!value || typeof value !== 'object') return null;
   const token = (value as { token?: unknown }).token;
   // Short or odd tokens would be guessable; treat them as no link at all.
-  return typeof token === 'string' && /^[A-Za-z0-9_-]{20,}$/.test(token) ? { token, role: 'view' } : null;
+  return typeof token === 'string' && /^[A-Za-z0-9_-]{20,}$/.test(token)
+    ? { token, role: 'view', anyone: (value as { anyone?: unknown }).anyone === true }
+    : null;
 }
 
 export async function writeDeckAccess(deckDir: string, access: DeckAccess): Promise<void> {
@@ -264,6 +285,11 @@ export function deckRoleFor(
   access: DeckAccess,
   config: AccessControlConfig,
 ): DeckRole | null {
+  // A link viewer is only ever what a matching "anyone" link gives.
+  if (typeof who !== 'string' && who.linkTokens) {
+    const link = access.link;
+    return link?.anyone && who.linkTokens.some((token) => sameSecret(token, link.token)) ? 'view' : null;
+  }
   const login = subjectLogin(who);
   if (login === normalizeLogin(config.admin) || access.owner === login) return 'owner';
   const granted: AccessRole[] = [];

@@ -11,6 +11,7 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  *     [--keep-uploads-days <n>]
  *     [--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag>
  *      [--cloudflare-port 5801] [--public-url https://slides.example.com]]
+ *     [--view-port 5802 [--view-url https://view.example.com]]
  *
  * Every Keynote and PowerPoint upload is kept for --keep-uploads-days (30 by
  * default, 0 turns it off) under <decksRootDir>/.uploads/, so an import that
@@ -39,6 +40,12 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  * tag; see src/server/cloudflareAccess.ts. Point the tunnel at this port,
  * never at --port.
  *
+ * --view-port opens a third loopback listener, with --access, for "anyone
+ * with the link can view, no sign-in": point a tunnel hostname that has NO
+ * Cloudflare Access application at it. There a deck opens only through its
+ * link secret, view-only, while its owner has the link set to "anyone"; see
+ * src/server/viewLinks.ts. --view-url is that hostname, for the links.
+ *
  * Hosts one directory of deck folders for browser clients over HTTP +
  * WebSocket: every subdirectory containing a deck.json is openable — nested
  * ones included, whose id is their path — new decks are created inside it,
@@ -60,6 +67,8 @@ let cloudflareTeam: string | null = null;
 let cloudflareAud: string | null = null;
 let cloudflarePort = 5801;
 let publicUrl: string | undefined;
+let viewPort: number | null = null;
+let viewUrl: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
@@ -71,6 +80,8 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--cloudflare-aud') cloudflareAud = args[++i];
   else if (args[i] === '--cloudflare-port') cloudflarePort = Number(args[++i]);
   else if (args[i] === '--public-url') publicUrl = args[++i];
+  else if (args[i] === '--view-port') viewPort = Number(args[++i]);
+  else if (args[i] === '--view-url') viewUrl = args[++i];
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
 const cloudflareRequested = cloudflareTeam !== null || cloudflareAud !== null;
@@ -79,13 +90,16 @@ if (
   || (cloudflareRequested && (!cloudflareTeam?.trim() || !cloudflareAud?.trim() || !accessAdmin
     || !Number.isInteger(cloudflarePort) || cloudflarePort <= 0 || cloudflarePort === port
     || (publicUrl !== undefined && !/^https:\/\/[^/\s]+\/?$/.test(publicUrl))))
+  || (viewPort !== null && (!accessAdmin || !Number.isInteger(viewPort) || viewPort <= 0 || viewPort === port
+    || (cloudflareRequested && viewPort === cloudflarePort)))
+  || (viewUrl !== undefined && (viewPort === null || !/^https:\/\/[^/\s]+\/?$/.test(viewUrl)))
 ) {
   process.stderr.write(
     'usage: npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0] '
     + '[--no-local-agents] [--agent-name <name>] '
     + '[--access <adminLogin>] [--keep-uploads-days <n>] '
     + '[--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag> [--cloudflare-port 5801] '
-    + '[--public-url https://slides.example.com]]\n'
+    + '[--public-url https://slides.example.com]] [--view-port 5802 [--view-url https://view.example.com]]\n'
     + (cloudflareRequested ? '  (--cloudflare-team and --cloudflare-aud go together, need --access, '
       + 'and --cloudflare-port must differ from --port)\n' : ''),
   );
@@ -127,6 +141,7 @@ const server = await startCollabServer({
   cloudflareAccess: cloudflareRequested
     ? { teamDomain: cloudflareTeam!, audience: cloudflareAud!, port: cloudflarePort, publicUrl }
     : undefined,
+  viewLinks: viewPort === null ? undefined : { port: viewPort, publicUrl: viewUrl },
   keepUploadsDays,
 });
 
@@ -137,6 +152,7 @@ process.stdout.write(`${JSON.stringify({
   cloudflareAccess: server.cloudflarePort === undefined
     ? null
     : { teamDomain: normalizeTeamDomain(cloudflareTeam!), port: server.cloudflarePort, publicUrl: publicUrl ?? null },
+  viewLinks: server.viewPort === undefined ? null : { port: server.viewPort, publicUrl: viewUrl ?? null },
   clientBundle: clientDir ?? null,
   localAgents: Boolean(localAgents),
   urls: server.urls,

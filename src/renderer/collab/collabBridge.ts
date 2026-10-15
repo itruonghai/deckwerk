@@ -80,6 +80,11 @@ export interface CollabBridgeHooks {
    */
   onUnavailable?: (reason: string) => void;
   /**
+   * The server refused this identity (4003): access revoked, never granted,
+   * or a view link turned off. Called after onStatus, once; no retry follows.
+   */
+  onRefused?: (reason: string) => void;
+  /**
    * False the moment the socket drops (a retry loop begins), true again on
    * every welcome. Distinct from onStatus so callers can drive UI state
    * without parsing status strings.
@@ -158,7 +163,9 @@ export class CollabBridge {
       // seconds, so stop and say why.
       if (event.code === 4003) {
         this.closed = true;
-        this.hooks.onStatus(event.reason || 'You no longer have access to this presentation');
+        const reason = event.reason || 'You no longer have access to this presentation';
+        this.hooks.onStatus(reason);
+        this.hooks.onRefused?.(reason);
         return;
       }
       // A deck that is not there (or was renamed: that close follows a
