@@ -34,7 +34,8 @@
  * otherwise entirely derived: see `folderVisibleTo`.
  */
 
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import { cloudflareIdentityOf, isCloudflareRequest } from './cloudflareAccess.js';
@@ -221,10 +222,17 @@ function readLink(value: unknown): DeckAccess['link'] {
 export async function writeDeckAccess(deckDir: string, access: DeckAccess): Promise<void> {
   // Whole or not at all: a reader never sees half a sidecar, which would
   // read as "corrupt", which reads as public.
+  // The staging copy is a dotfile, which nothing serves, downloads, mirrors
+  // or imports: if a crash leaves it behind, the secret in it stays put.
   const target = join(deckDir, ACCESS_FILE);
-  const staging = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(staging, `${JSON.stringify(access, null, 2)}\n`, 'utf8');
-  await rename(staging, target);
+  const staging = join(deckDir, `.${ACCESS_FILE}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(staging, `${JSON.stringify(access, null, 2)}\n`, 'utf8');
+    await rename(staging, target);
+  } catch (error) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 const accessLocks = new Map<string, Promise<unknown>>();

@@ -355,6 +355,42 @@ describe('collab server Cloudflare Access door', () => {
     expect(removed.sharedWith.map((s: any) => s.login).sort()).toEqual(['added@x.example', 'joined@x.example']);
   });
 
+  it('never lets a stale Share dialog bring back someone another manager removed', async () => {
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=for-prof`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((response) => response.json() as Promise<any>);
+    const BOB = 'bob@x.example';
+    await put({ sharedWith: [{ login: PROF, role: 'view' }, { login: BOB, role: 'edit' }] });
+    const staleBase = (await get(server.port, '/api/access?deck=for-prof')).body.sharedWith;
+    // Another manager removes Bob.
+    await put({ sharedWith: [{ login: PROF, role: 'view' }], sharedWithBase: staleBase });
+    // The stale dialog leaves Bob's row alone and changes something else.
+    const unchanged = await put({
+      sharedWith: [{ login: PROF, role: 'edit' }, { login: BOB, role: 'edit' }], sharedWithBase: staleBase,
+    });
+    expect(unchanged.sharedWith).toEqual([{ login: PROF, role: 'edit' }]);
+    // Nor does changing Bob's role in that stale dialog resurrect him.
+    const demoted = await put({
+      sharedWith: [{ login: PROF, role: 'edit' }, { login: BOB, role: 'view' }], sharedWithBase: staleBase,
+    });
+    expect(demoted.sharedWith).toEqual([{ login: PROF, role: 'edit' }]);
+  });
+
+  it('leaves no copy of the sidecar behind, and never serves a stray staging file', async () => {
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=for-prof`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then((response) => response.json() as Promise<any>);
+    for (let i = 0; i < 5; i++) await put({ link: 'reset' });
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(join(rootDir, 'for-prof'))).filter((name) => name.includes('access.json'))).toEqual(['access.json']);
+    // A crash between write and rename would leave a hidden file like this one.
+    await writeFile(join(rootDir, 'for-prof', '.access.json.crashed.tmp'), '{"link":{"token":"leaked-secret-token-xyz"}}', 'utf8');
+    const zip = Buffer.from(await (await fetch(
+      `http://127.0.0.1:${server.cloudflarePort}/api/download?deck=for-prof`, { headers: as(PROF) },
+    )).arrayBuffer());
+    expect(zip.includes('leaked-secret-token-xyz')).toBe(false);
+  });
+
   it('never demotes someone who already has more than the link gives', async () => {
     const port = server.cloudflarePort!;
     await writeFile(join(rootDir, 'for-prof', 'access.json'), JSON.stringify({

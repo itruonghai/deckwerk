@@ -1791,11 +1791,21 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
               if (!Array.isArray(payload.sharedWithBase) || payload.sharedWithBase.length > 500) {
                 return respondJson(response, 400, { error: 'sharedWithBase must be the list the change started from' });
               }
-              const removed = new Set(normalizeShares(payload.sharedWithBase).map((share) => share.login)
-                .filter((login) => !submitted.some((share) => share.login === login)));
-              const kept = access.sharedWith.filter((share) =>
-                !removed.has(share.login) && !submitted.some((entry) => entry.login === share.login));
-              next.sharedWith = [...submitted, ...kept];
+              // Only rows this person actually changed are applied: an
+              // untouched row is not "set them to this", or a stale dialog
+              // would restore someone another manager just removed.
+              const base = new Map(normalizeShares(payload.sharedWithBase).map((share) => [share.login, share.role]));
+              const wanted = new Map(submitted.map((share) => [share.login, share.role]));
+              const result = new Map(access.sharedWith.map((share) => [share.login, share.role]));
+              for (const [login, role] of base) {
+                if (!wanted.has(login)) result.delete(login);
+                // A role change for someone removed meanwhile does not bring them back.
+                else if (wanted.get(login) !== role && result.has(login)) result.set(login, wanted.get(login)!);
+              }
+              for (const [login, role] of wanted) {
+                if (!base.has(login)) result.set(login, role);
+              }
+              next.sharedWith = [...result].map(([login, role]) => ({ login, role }));
             }
           }
           if (payload.link !== undefined) {
