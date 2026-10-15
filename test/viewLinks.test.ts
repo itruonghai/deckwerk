@@ -4,7 +4,7 @@
  * secret, view-only, while its owner has the link set to "anyone", and stops
  * the moment the link is turned off, reset or made sign-in-only.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,10 +21,10 @@ describe('collab server view-link door', () => {
   let server: RunningCollabServer;
   let sockets: WebSocket[] = [];
 
-  const seedDeck = async (id: string, access?: object) => {
+  const seedDeck = async (id: string, access?: object, slide: object = {}) => {
     const dir = join(rootDir, id);
     await mkdir(dir, { recursive: true });
-    await saveDeck(dir, parseDeck({ ...emptyDeck(id), slides: [{ id: 's1', name: 'One' }] }));
+    await saveDeck(dir, parseDeck({ ...emptyDeck(id), slides: [{ id: 's1', name: 'One', ...slide }] }));
     await writeFile(join(dir, 'theme.css'), '/* t */\n', 'utf8');
     if (access) await writeFile(join(dir, 'access.json'), JSON.stringify(access), 'utf8');
   };
@@ -71,7 +71,10 @@ describe('collab server view-link door', () => {
 
   beforeEach(async () => {
     rootDir = await mkdtemp(join(tmpdir(), 'collab-view-links-'));
-    await seedDeck('talk', { owner: ADMIN, visibility: 'private', sharedWith: [] });
+    await seedDeck('talk', { owner: ADMIN, visibility: 'private', sharedWith: [] }, {
+      notes: 'SECRET-SPEAKER-NOTES',
+      comments: [{ id: 'c1', author: 'Rev', text: 'SECRET-REVIEW-COMMENT', ts: '2026-10-14T00:00:00Z' }],
+    });
     await seedDeck('other', { owner: ADMIN, visibility: 'private', sharedWith: [] });
     await seedDeck('legacy'); // no sidecar: public to the tailnet
     server = await startCollabServer({
@@ -91,12 +94,12 @@ describe('collab server view-link door', () => {
   });
 
   it('opens nothing without a link — whatever the request claims to be', async () => {
-    for (const path of ['/', '/api/config', '/api/decks', '/api/deck?deck=legacy']) {
+    for (const path of ['/', '/api/config', '/api/decks', '/api/config?deck=legacy']) {
       expect((await view(path)).status).toBe(403);
     }
     expect((await view('/api/config', { 'tailscale-user-login': ADMIN })).status).toBe(403);
     expect((await view('/api/config', { 'cf-access-jwt-assertion': 'x.y.z' })).status).toBe(403);
-    expect((await view(`/api/deck?deck=talk&view=${'a'.repeat(24)}`)).status).toBe(403);
+    expect((await view(`/api/config?deck=talk&view=${'a'.repeat(24)}`)).status).toBe(403);
   });
 
   it('opens one deck, view-only, through its "anyone" link, and keeps it open by cookie', async () => {
@@ -115,13 +118,17 @@ describe('collab server view-link door', () => {
     expect(page.cookie).toMatch(/Secure/);
     const cookie = { cookie: cookieFor(page.cookie!) };
 
-    expect((await view('/api/deck?deck=talk', cookie)).status).toBe(200);
-    expect(((await view('/api/decks', cookie)).body as any[]).map((deck) => deck.id)).toEqual(['talk']);
-    expect((await view('/api/deck?deck=other', cookie)).status).toBe(403);
-    expect((await view('/api/deck?deck=legacy', cookie)).status).toBe(403);
+    expect((await view('/api/config?deck=talk', cookie)).status).toBe(200);
+    // Not even the list of decks: the link is to one presentation.
+    expect((await view('/api/decks', cookie)).status).toBe(403);
+    expect((await view('/api/config?deck=other', cookie)).status).toBe(403);
+    expect((await view('/api/config?deck=legacy', cookie)).status).toBe(403);
     // Watching only: not the source, not the chat, not who it is shared with, not the people here.
-    for (const path of ['/api/download?deck=talk', '/api/chat?deck=talk', '/api/access?deck=talk', '/api/users']) {
-      expect((await view(path, cookie)).status).toBe(403);
+    for (const path of ['/api/download?deck=talk', '/api/chat?deck=talk', '/api/access?deck=talk', '/api/users',
+      '/api/deck?deck=talk', '/api/comments?deck=talk', '/api/text?deck=talk', '/api/context?deck=talk',
+      '/api/render-slide?deck=talk&slide=1', '/api/agent-mirror/files?deck=talk', '/api/export/web?deck=talk']) {
+      // (The agent-mirror routes are not even routed for a browser: 404.)
+      expect([403, 404], path).toContain((await view(path, cookie)).status);
     }
     const write = await fetch(`http://127.0.0.1:${server.viewPort}/api/comments?deck=talk`, {
       method: 'POST', headers: { ...cookie, 'content-type': 'application/json' }, body: '{}',
@@ -139,9 +146,9 @@ describe('collab server view-link door', () => {
     expect(body.link.anyone).toBe(false);
     expect(new URL(body.linkUrl, 'https://relative.invalid').searchParams.has('invite')).toBe(true);
     const token = tokenOf(body.linkUrl);
-    expect((await view(`/api/deck?deck=talk&view=${token}`)).status).toBe(403);
+    expect((await view(`/api/config?deck=talk&view=${token}`)).status).toBe(403);
     // An invite on this door joins nobody to anything.
-    expect((await view(`/api/deck?deck=talk&invite=${token}`)).status).toBe(403);
+    expect((await view(`/api/config?deck=talk&invite=${token}`)).status).toBe(403);
   });
 
   it('cuts viewers off — live sockets included — when the link is reset, made sign-in-only, or turned off', async () => {
@@ -156,7 +163,7 @@ describe('collab server view-link door', () => {
       await ready;
       await setLink('talk', next);
       expect(await live).toEqual({ welcome: true, closed: 4003 });
-      expect((await view('/api/deck?deck=talk', cookie)).status).toBe(403);
+      expect((await view('/api/config?deck=talk', cookie)).status).toBe(403);
       await setLink('talk', 'off');
     }
   });
@@ -168,12 +175,12 @@ describe('collab server view-link door', () => {
     const b = cookieFor((await view(`/?deck=other&view=${other}`)).cookie!);
     expect(a.split('=')[0]).not.toBe(b.split('=')[0]);
     const both = { cookie: `${a}; ${b}` };
-    expect((await view('/api/deck?deck=talk', both)).status).toBe(200);
-    expect((await view('/api/deck?deck=other', both)).status).toBe(200);
-    expect((await view('/api/deck?deck=other', { cookie: a })).status).toBe(403);
+    expect((await view('/api/config?deck=talk', both)).status).toBe(200);
+    expect((await view('/api/config?deck=other', both)).status).toBe(200);
+    expect((await view('/api/config?deck=other', { cookie: a })).status).toBe(403);
     await setLink('other', 'off');
-    expect((await view('/api/deck?deck=other', both)).status).toBe(403);
-    expect((await view('/api/deck?deck=talk', both)).status).toBe(200);
+    expect((await view('/api/config?deck=other', both)).status).toBe(403);
+    expect((await view('/api/config?deck=talk', both)).status).toBe(200);
   });
 
   it('refuses "anyone" links on a server without a view-link address, and a door without access control', async () => {
@@ -188,5 +195,56 @@ describe('collab server view-link door', () => {
     }
     await expect(startCollabServer({ rootDir, port: 0, host: '127.0.0.1', viewLinks: { port: 0 } }))
       .rejects.toThrow(/accessControl/);
+  });
+
+  it('shows a link viewer the slides, never the chat, speaker notes or review comments', async () => {
+    const token = tokenOf((await setLink('talk', 'anyone')).body.linkUrl);
+    const cookie = { cookie: cookieFor((await view(`/?deck=talk&view=${token}`)).cookie!) };
+    // Someone on the team says something in the deck chat.
+    const chat = await fetch(`http://127.0.0.1:${server.port}/api/chat?deck=talk`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'SECRET-CHAT-LINE' }),
+    });
+    expect(chat.status).toBe(200);
+
+    const frames: string[] = [];
+    const socket = new WebSocket(`ws://127.0.0.1:${server.viewPort}/ws?deck=talk`, { headers: cookie });
+    sockets.push(socket);
+    await new Promise<void>((resolveOpen, reject) => {
+      socket.on('open', () => socket.send(JSON.stringify({ kind: 'hello', version: COLLAB_PROTOCOL_VERSION })));
+      socket.on('message', (raw) => {
+        frames.push(String(raw));
+        if (frames.length === 1) resolveOpen();
+      });
+      socket.on('error', reject);
+    });
+    const welcome = JSON.parse(frames[0]);
+    expect(welcome.kind).toBe('welcome');
+    expect(welcome.deck.slides[0].name).toBe('One');
+    expect(welcome.chat).toEqual([]);
+
+    // Live: more chat, a new comment, new notes — none of it reaches the viewer;
+    // a slide edit does.
+    await fetch(`http://127.0.0.1:${server.port}/api/chat?deck=talk`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'SECRET-LIVE-CHAT' }),
+    });
+    const editor = new WebSocket(`ws://127.0.0.1:${server.port}/ws?deck=talk`);
+    sockets.push(editor);
+    await new Promise<void>((resolveOpen) => {
+      editor.on('open', () => editor.send(JSON.stringify({ kind: 'hello', version: COLLAB_PROTOCOL_VERSION })));
+      editor.once('message', () => resolveOpen());
+    });
+    editor.send(JSON.stringify({
+      kind: 'txn', txnId: 't1', baseSeq: welcome.seq, label: 'notes',
+      ops: [
+        { op: 'setSlideProperties', slideId: 's1', slide: { id: 's1', name: 'Renamed', notes: 'SECRET-LIVE-NOTES' } },
+        { op: 'updateComments', slideId: 's1', base: [], comments: [{ id: 'c2', author: 'Rev', text: 'SECRET-LIVE-COMMENT', ts: '2026-10-14T00:00:01Z' }] },
+      ],
+    }));
+    await vi.waitFor(() => expect(frames.some((frame) => frame.includes('Renamed'))).toBe(true));
+    const everything = frames.join('\n');
+    for (const secret of ['SECRET-SPEAKER-NOTES', 'SECRET-REVIEW-COMMENT', 'SECRET-CHAT-LINE', 'SECRET-LIVE-CHAT',
+      'SECRET-LIVE-NOTES', 'SECRET-LIVE-COMMENT']) {
+      expect(everything).not.toContain(secret);
+    }
   });
 });

@@ -1093,7 +1093,9 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   /** Messages carrying a whole deck are spliced from a cache (deckWire.ts). */
   const wire = new DeckWire();
   const send = (peer: Peer, message: ServerMessage) => {
-    if (peer.socket.readyState === peer.socket.OPEN) peer.socket.send(wire.encode(message), { binary: false });
+    if (peer.socket.readyState !== peer.socket.OPEN) return;
+    const shown = peer.identity?.linkTokens ? forLinkViewer(message) : message;
+    if (shown) peer.socket.send(wire.encode(shown), { binary: false });
   };
   /**
    * One message to every greeted peer. Serialised and encoded once, however
@@ -1105,12 +1107,23 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
    */
   const broadcast = (room: Room, message: ServerMessage, except?: string) => {
     let data: Buffer | null = null;
+    // Link viewers get the presentation copy, also encoded once (or nothing).
+    let viewerData: Buffer | null | undefined;
+    const encode = (value: ServerMessage): Buffer => {
+      const encoded = wire.encode(value);
+      return typeof encoded === 'string' ? Buffer.from(encoded, 'utf8') : encoded;
+    };
     for (const [id, peer] of room.peers) {
       if (id === except || !peer.greeted || peer.socket.readyState !== peer.socket.OPEN) continue;
-      if (!data) {
-        const encoded = wire.encode(message);
-        data = typeof encoded === 'string' ? Buffer.from(encoded, 'utf8') : encoded;
+      if (peer.identity?.linkTokens) {
+        if (viewerData === undefined) {
+          const shown = forLinkViewer(message);
+          viewerData = shown ? encode(shown) : null;
+        }
+        if (viewerData) peer.socket.send(viewerData, { binary: false });
+        continue;
       }
+      data ??= encode(message);
       peer.socket.send(data, { binary: false });
     }
   };
@@ -5113,14 +5126,16 @@ const GUEST_FORBIDDEN_WRITES = new Set([
 ]);
 
 /**
- * What a link viewer may not do beyond a guest: take the deck away whole, or
- * read what its people say to each other. They came to watch the slides.
+ * The only API routes a link viewer may use. They came to watch the slides:
+ * the presentation page needs its configuration and the live socket, and
+ * nothing that hands over the document itself (its notes, comments, chat,
+ * sharing, source) or makes the server do heavy work on a stranger's say-so.
  */
-const LINK_VIEWER_FORBIDDEN = new Set(['/api/download', '/api/export/web', '/api/chat', '/api/access']);
+const LINK_VIEWER_API = new Set(['/api/config', '/api/capabilities']);
 
 function guestForbidden(path: string, method: string, linkViewer = false): boolean {
   if (GUEST_FORBIDDEN_ANY.has(path)) return true;
-  if (linkViewer && LINK_VIEWER_FORBIDDEN.has(path)) return true;
+  if (linkViewer && path.startsWith('/api/') && !LINK_VIEWER_API.has(path)) return true;
   return method !== 'GET' && method !== 'HEAD' && GUEST_FORBIDDEN_WRITES.has(path);
 }
 
@@ -5129,3 +5144,75 @@ function newLinkToken(): string {
   return randomBytes(18).toString('base64url');
 }
 
+/**
+ * A deck as a link viewer sees it: the slides, without what the people
+ * making it keep for themselves — speaker notes and review comments.
+ */
+function presentationDeck(deck: Deck): Deck {
+  return { ...deck, slides: deck.slides.map(presentationSlide) };
+}
+
+function presentationSlide<T extends Deck['slides'][number]>(slide: T): T {
+  const { comments: _comments, ...rest } = slide as T & { comments?: unknown };
+  return {
+    ...rest,
+    notes: '',
+    elements: slide.elements.map(presentationElement),
+  } as T;
+}
+
+function presentationElement<T extends Deck['slides'][number]['elements'][number]>(element: T): T {
+  if (!('comments' in element)) return element;
+  const { comments: _comments, ...rest } = element as T & { comments?: unknown };
+  return rest as T;
+}
+
+/** The same edits, less what a link viewer does not see (see presentationDeck). */
+function presentationOps(ops: AgentOperation[]): AgentOperation[] {
+  const shown: AgentOperation[] = [];
+  for (const op of ops) {
+    switch (op.op) {
+      case 'updateComments':
+        continue;
+      case 'insertSlides':
+        shown.push({ ...op, slides: op.slides.map(presentationSlide) });
+        continue;
+      case 'replaceSlide':
+        shown.push({ ...op, slide: presentationSlide(op.slide) });
+        continue;
+      case 'insertElements':
+        shown.push({ ...op, elements: op.elements.map(presentationElement) });
+        continue;
+      case 'replaceElement':
+        shown.push({ ...op, element: presentationElement(op.element) });
+        continue;
+      case 'setSlideProperties': {
+        const { notes: _notes, comments: _comments, ...slide } = op.slide as typeof op.slide & { comments?: unknown };
+        shown.push({ ...op, slide: slide as typeof op.slide });
+        continue;
+      }
+      default:
+        shown.push(op);
+    }
+  }
+  return shown;
+}
+
+/**
+ * What a link viewer's socket is sent instead of `message`, or null for
+ * nothing at all: no chat, and decks and edits without notes and comments.
+ */
+function forLinkViewer(message: ServerMessage): ServerMessage | null {
+  switch (message.kind) {
+    case 'chat':
+      return null;
+    case 'welcome':
+      return { ...message, deck: presentationDeck(message.deck), chat: [] };
+    case 'deck':
+      return { ...message, deck: presentationDeck(message.deck) };
+    case 'txn':
+      return { ...message, ops: presentationOps(message.ops) };
+    default:
+      return message;
+  }
+}

@@ -90,6 +90,14 @@ window.addEventListener('keydown', (event) => {
 }, true);
 
 const params = new URLSearchParams(location.search);
+// A view link's secret has done its job once the page is open: the server
+// keeps it in a cookie for this deck. Out of the address bar, it stays out of
+// the history and of whatever the address is copied into next.
+if (params.has('view')) {
+  const kept = new URLSearchParams(params);
+  kept.delete('view');
+  history.replaceState(history.state, '', `${location.pathname}?${kept}${location.hash}`);
+}
 const deckId = params.get('deck');
 if (!deckId) {
   document.body.textContent = 'Missing ?deck= parameter.';
