@@ -244,6 +244,11 @@ export const COLLAB_CLOSE = {
   noSuchDeck: 4404,
   /** The deck was renamed; a `deckMoved` message preceded this close. */
   moved: 4301,
+  /**
+   * The person's sign-in ran out (a Cloudflare Access session): the page
+   * must load again, through the sign-in, before it may reconnect.
+   */
+  signInExpired: 4401,
 } as const;
 
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;

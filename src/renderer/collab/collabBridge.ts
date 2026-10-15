@@ -170,10 +170,36 @@ export class CollabBridge {
         this.hooks.onUnavailable?.(reason);
         return;
       }
+      // The sign-in in front of the server (Cloudflare Access) ran out. Only
+      // a page load goes through the sign-in again, so load the page.
+      if (event.code === COLLAB_CLOSE.signInExpired) {
+        this.closed = true;
+        this.hooks.onStatus('Your sign-in has expired — signing in again…');
+        location.reload();
+        return;
+      }
       this.hooks.onStatus(`Disconnected — retrying in ${Math.round(this.reconnectDelay / 1000)}s`);
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
-        if (!this.closed) this.connect();
+        if (this.closed) return;
+        if (!behindPageSignIn(this.url)) {
+          this.connect();
+          return;
+        }
+        // A sign-in that ran out while the socket was down refuses the
+        // handshake before it reaches the server, which looks like any
+        // dropped connection. Ask once per retry whether the page itself
+        // would now be sent to the sign-in; if so, go there instead.
+        void signInLapsed().then((lapsed) => {
+          if (this.closed) return;
+          if (lapsed) {
+            this.closed = true;
+            this.hooks.onStatus('Your sign-in has expired — signing in again…');
+            location.reload();
+          } else {
+            this.connect();
+          }
+        });
       }, this.reconnectDelay);
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 10_000);
     });
@@ -485,4 +511,33 @@ function joinNaturalLanguage(items: string[]): string {
   if (items.length < 2) return items[0] ?? '';
   if (items.length === 2) return `${items[0]} and ${items[1]}`;
   return `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
+}
+
+/**
+ * Whether the server is now behind a sign-in this page no longer holds: the
+ * request is answered with a redirect (to Cloudflare Access's login) rather
+ * than by the server. A network failure, or any answer from the server
+ * itself, is not that: those keep retrying as before.
+ */
+async function signInLapsed(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/config', { redirect: 'manual', cache: 'no-store', credentials: 'same-origin' });
+    return response.type === 'opaqueredirect' || response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the socket goes to the server that served this page, the only one
+ * whose sign-in the page can ask about. The desktop editor joins other hosts'
+ * sessions from a file:// page, where there is no sign-in to lapse.
+ */
+function behindPageSignIn(socketUrl: string): boolean {
+  try {
+    return typeof location !== 'undefined' && location.protocol === 'https:'
+      && new URL(socketUrl, location.href).host === location.host;
+  } catch {
+    return false;
+  }
 }

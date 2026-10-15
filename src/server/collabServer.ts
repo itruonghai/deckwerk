@@ -9,7 +9,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, w
 import { createHash, randomUUID } from 'node:crypto';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
-import { isIP } from 'node:net';
+import { createServer as createNetServer, isIP, type Server as NetServer, type Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -104,6 +104,14 @@ import {
   type DeckRole,
   type Identity,
 } from './accessControl.js';
+import {
+  admitCloudflareSocket,
+  cloudflareSessionEndsAt,
+  createCloudflareAccessVerifier,
+  isCloudflareRequest,
+  type CloudflareAccessConfig,
+  type CloudflareAccessVerifier,
+} from './cloudflareAccess.js';
 
 /** How long shutdown lets peers finish the WebSocket close handshake. */
 const SOCKET_CLOSE_GRACE_MS = 500;
@@ -312,6 +320,13 @@ export interface CollabServerOptions {
    */
   accessControl?: AccessControlConfig;
   /**
+   * A second door for people off the tailnet (cloudflareAccess.ts): a
+   * loopback listener on `port` for a Cloudflare Tunnel, where identity is
+   * the Cloudflare Access token, checked against `teamDomain` and `audience`.
+   * Needs `accessControl`. `verifier` replaces the real key fetch in tests.
+   */
+  cloudflareAccess?: CloudflareAccessConfig & { port: number; verifier?: CloudflareAccessVerifier };
+  /**
    * Called when the host requests the session end (POST /api/end from
    * loopback in a hosted session). The owner tears the server down; the
    * endpoint itself only notifies peers.
@@ -336,6 +351,8 @@ export interface CollabServerOptions {
 export interface RunningCollabServer {
   urls: string[];
   port: number;
+  /** The Cloudflare Tunnel listener's port, when `cloudflareAccess` is set. */
+  cloudflarePort?: number;
   /** Persist every room immediately instead of waiting for its save debounce. */
   flush: () => Promise<void>;
   /** Tell connected peers this was an intentional host end, not a network loss. */
@@ -405,6 +422,12 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   const sharedAgent = localAgents;
   const accessControl = options.accessControl
     ? { admin: normalizeLogin(options.accessControl.admin) }
+    : null;
+  if (options.cloudflareAccess && !accessControl) {
+    throw new Error('cloudflareAccess needs accessControl: without it there is nobody to check the token for');
+  }
+  const cloudflare = options.cloudflareAccess
+    ? options.cloudflareAccess.verifier ?? createCloudflareAccessVerifier(options.cloudflareAccess)
     : null;
   // Everyone the server has ever identified, for share-dialog autocomplete.
   const userDirectory = accessControl ? new UserDirectory(join(resolve(options.rootDir), 'users.json')) : null;
@@ -1117,7 +1140,11 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   const isHostRequest = (request: IncomingMessage): boolean => accessControl
     ? resolveIdentity(request, accessControl)?.login === accessControl.admin
     : isLoopbackRequest(request);
-  const canUseSharedAgent = (_request: IncomingMessage): boolean => Boolean(sharedAgent);
+  // Not through the Cloudflare door: the bridge a participant runs is fetched
+  // by curl and node from a terminal, which never holds their browser's
+  // Cloudflare sign-in, so the command the panel offers could not work.
+  const canUseSharedAgent = (request: IncomingMessage): boolean =>
+    Boolean(sharedAgent) && !isCloudflareRequest(request);
 
   const agentChatId = (deckId: string, participantId: string | null): string | null => {
     if (sharedAgent && participantId) return sharedAgent.chatId(deckDirOf(deckId), participantId);
@@ -1366,10 +1393,13 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     // gets a single byte — including the client bundle. One check here covers
     // every ?deck=-scoped route; the asset route and the WebSocket upgrade
     // carry the deck id elsewhere and repeat the deck check themselves.
+    if (cloudflare && isCloudflareRequest(request)) await cloudflare.admit(request);
     const identity = accessControl ? resolveIdentity(request, accessControl) : null;
     if (accessControl && !identity) {
       return respondJson(response, 403, {
-        error: 'unidentified connection — this server is reachable only through tailscale serve',
+        error: isCloudflareRequest(request)
+          ? 'not signed in — open this server through its Cloudflare Access address'
+          : 'unidentified connection — this server is reachable only through tailscale serve',
       });
     }
     if (identity && userDirectory) void userDirectory.note(identity);
@@ -2332,7 +2362,8 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     if (path === '/api/end' && request.method === 'POST') {
       const remote = request.socket.remoteAddress ?? '';
       const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
-      if (!hostedDeckId || !loopback) {
+      // The tunnel daemon is loopback too; nobody through it is the host.
+      if (!hostedDeckId || !loopback || isCloudflareRequest(request)) {
         return respondJson(response, 403, { error: 'only the host can end the session' });
       }
       for (const room of rooms.values()) broadcast(room, { kind: 'ended' });
@@ -3517,6 +3548,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       let canEdit = true;
       let canComment = true;
       if (accessControl) {
+        if (cloudflare && isCloudflareRequest(request)) await cloudflare.admit(request);
         identity = resolveIdentity(request, accessControl);
         const role = identity ? await deckRoleOf(identity, deckId) : null;
         if (!identity || !role) {
@@ -3561,6 +3593,16 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       }
       bindPeer(room, socket, identity, canEdit, canComment);
       socket.resume();
+      // A socket outlives the sign-in it was opened with. When a Cloudflare
+      // Access session runs out, close it; the page reloads through the
+      // sign-in and comes back with a fresh token, or does not come back.
+      const endsAt = isCloudflareRequest(request) ? cloudflareSessionEndsAt(request) : null;
+      if (endsAt !== null) {
+        const expire = setTimeout(() => {
+          socket.close(COLLAB_CLOSE.signInExpired, 'Your sign-in has expired');
+        }, Math.min(Math.max(0, endsAt - Date.now()), 2 ** 31 - 1));
+        socket.once('close', () => clearTimeout(expire));
+      }
     })();
   });
 
@@ -3748,10 +3790,41 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     });
   });
   boundPort = port;
+
+  // The Cloudflare Tunnel's own door. Its connections are handed to the same
+  // HTTP server, so every route and the WebSocket behave exactly as on the
+  // main port; only the identity rule differs, by which listener accepted it.
+  let cloudflareServer: NetServer | null = null;
+  const cloudflareConnections = new Set<Socket>();
+  let cloudflarePort: number | undefined;
+  if (options.cloudflareAccess) {
+    const server = createNetServer((socket) => {
+      admitCloudflareSocket(socket);
+      cloudflareConnections.add(socket);
+      socket.once('close', () => cloudflareConnections.delete(socket));
+      httpServer.emit('connection', socket);
+    });
+    cloudflareServer = server;
+    try {
+      cloudflarePort = await new Promise<number>((resolvePromise, reject) => {
+        server.once('error', reject);
+        // Loopback only: the tunnel daemon runs on this machine.
+        server.listen(options.cloudflareAccess!.port, '127.0.0.1', () => {
+          const address = server.address();
+          resolvePromise(typeof address === 'object' && address ? address.port : options.cloudflareAccess!.port);
+        });
+      });
+    } catch (error) {
+      httpServer.close();
+      httpServer.closeAllConnections();
+      throw error;
+    }
+  }
   unsubscribeSharedAgent = sharedAgent?.subscribe(emitSharedAgentState);
 
   return {
     port,
+    cloudflarePort,
     urls: reachableUrls(host, port),
     flush: async () => {
       await Promise.all([...rooms.values()].map((room) => room.session.flush()));
@@ -3794,10 +3867,16 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       // keeps that response open indefinitely — so the await never returned
       // and "End collaboration" hung with the shell still on screen. Ending
       // the session means disconnecting everyone, so tear the sockets down.
-      await new Promise<void>((resolvePromise) => {
-        httpServer.close(() => resolvePromise());
-        httpServer.closeAllConnections();
-      });
+      await Promise.all([
+        new Promise<void>((resolvePromise) => {
+          httpServer.close(() => resolvePromise());
+          httpServer.closeAllConnections();
+        }),
+        cloudflareServer && new Promise<void>((resolvePromise) => {
+          cloudflareServer!.close(() => resolvePromise());
+          for (const socket of cloudflareConnections) socket.destroy();
+        }),
+      ]);
       for (const room of rooms.values()) await room.session.close();
       sharedAgent?.close();
       await userDirectory?.flush();

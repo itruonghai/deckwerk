@@ -10,6 +10,11 @@
  * without the headers is someone at the machine itself (SSH, curl, the
  * launchd owner) and counts as the admin.
  *
+ * A second door, for people off the tailnet, is a Cloudflare Tunnel behind
+ * Cloudflare Access on a listener of its own (cloudflareAccess.ts). On that
+ * listener none of the above applies: identity is the verified Access token
+ * or nobody.
+ *
  * Per-deck permissions live in an `access.json` sidecar next to `deck.json`.
  * It is deliberately not part of the deck document: deck.json rides the
  * collab diff/sync path, and a permissions file must never be editable
@@ -32,6 +37,7 @@
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
+import { cloudflareIdentityOf, isCloudflareRequest } from './cloudflareAccess.js';
 
 export interface AccessControlConfig {
   /** Tailnet login of the administrator; sees and manages every deck. */
@@ -96,6 +102,9 @@ export function resolveIdentity(
   request: IncomingMessage,
   config: AccessControlConfig,
 ): Identity | null {
+  // The tunnel daemon connects over loopback too, and passes through whatever
+  // headers the visitor sent: only the token Cloudflare signed says who it is.
+  if (isCloudflareRequest(request)) return cloudflareIdentityOf(request);
   if (!isLoopback(request)) return null;
   const login = headerValue(request, 'tailscale-user-login');
   if (login) {

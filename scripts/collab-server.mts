@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { startCollabServer, defaultClientDir, importerProblems, mediaToolProblems } from '../src/server/collabServer.js';
 import { LocalAgentRegistry } from '../src/server/localAgents.js';
+import { normalizeTeamDomain } from '../src/server/cloudflareAccess.js';
 import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
 
 /**
@@ -8,6 +9,8 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  *   npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0]
  *     [--no-local-agents] [--agent-name <name>] [--access <adminLogin>]
  *     [--keep-uploads-days <n>]
+ *     [--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag>
+ *      [--cloudflare-port 5801]]
  *
  * Every Keynote and PowerPoint upload is kept for --keep-uploads-days (30 by
  * default, 0 turns it off) under <decksRootDir>/.uploads/, so an import that
@@ -28,6 +31,14 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  * behaves exactly as before: no identity, every deck open to anyone who can
  * reach the port.
  *
+ * --cloudflare-team / --cloudflare-aud open a second door, with --access,
+ * for people off the tailnet: a loopback listener on --cloudflare-port (5801)
+ * for a Cloudflare Tunnel (`cloudflared`) behind a Cloudflare Access
+ * application. There identity is the email in the token Cloudflare Access
+ * signs, checked against the team's keys and the application's audience
+ * tag; see src/server/cloudflareAccess.ts. Point the tunnel at this port,
+ * never at --port.
+ *
  * Hosts one directory of deck folders for browser clients over HTTP +
  * WebSocket: every subdirectory containing a deck.json is openable — nested
  * ones included, whose id is their path — new decks are created inside it,
@@ -45,6 +56,9 @@ let localAgentsEnabled = true;
 let agentName = 'Your agent';
 let accessAdmin: string | null = null;
 let keepUploadsDays = 30;
+let cloudflareTeam: string | null = null;
+let cloudflareAud: string | null = null;
+let cloudflarePort = 5801;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
@@ -52,13 +66,24 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--agent-name') agentName = args[++i];
   else if (args[i] === '--access') accessAdmin = args[++i];
   else if (args[i] === '--keep-uploads-days') keepUploadsDays = Number(args[++i]);
+  else if (args[i] === '--cloudflare-team') cloudflareTeam = args[++i];
+  else if (args[i] === '--cloudflare-aud') cloudflareAud = args[++i];
+  else if (args[i] === '--cloudflare-port') cloudflarePort = Number(args[++i]);
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
-if (!rootDir || Number.isNaN(port) || !(keepUploadsDays >= 0) || (accessAdmin !== null && !accessAdmin?.trim())) {
+const cloudflareRequested = cloudflareTeam !== null || cloudflareAud !== null;
+if (
+  !rootDir || Number.isNaN(port) || !(keepUploadsDays >= 0) || (accessAdmin !== null && !accessAdmin?.trim())
+  || (cloudflareRequested && (!cloudflareTeam?.trim() || !cloudflareAud?.trim() || !accessAdmin
+    || !Number.isInteger(cloudflarePort) || cloudflarePort <= 0 || cloudflarePort === port))
+) {
   process.stderr.write(
     'usage: npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0] '
     + '[--no-local-agents] [--agent-name <name>] '
-    + '[--access <adminLogin>] [--keep-uploads-days <n>]\n',
+    + '[--access <adminLogin>] [--keep-uploads-days <n>] '
+    + '[--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag> [--cloudflare-port 5801]]\n'
+    + (cloudflareRequested ? '  (--cloudflare-team and --cloudflare-aud go together, need --access, '
+      + 'and --cloudflare-port must differ from --port)\n' : ''),
   );
   process.exit(2);
 }
@@ -95,6 +120,9 @@ const server = await startCollabServer({
   host,
   localAgents,
   accessControl: accessAdmin ? { admin: accessAdmin } : undefined,
+  cloudflareAccess: cloudflareRequested
+    ? { teamDomain: cloudflareTeam!, audience: cloudflareAud!, port: cloudflarePort }
+    : undefined,
   keepUploadsDays,
 });
 
@@ -102,6 +130,9 @@ process.stdout.write(`${JSON.stringify({
   status: 'serving',
   rootDir: resolve(rootDir),
   accessControl: accessAdmin ? { admin: accessAdmin } : null,
+  cloudflareAccess: server.cloudflarePort === undefined
+    ? null
+    : { teamDomain: normalizeTeamDomain(cloudflareTeam!), port: server.cloudflarePort },
   clientBundle: clientDir ?? null,
   localAgents: Boolean(localAgents),
   urls: server.urls,
