@@ -5149,7 +5149,19 @@ function newLinkToken(): string {
  * making it keep for themselves — speaker notes and review comments.
  */
 function presentationDeck(deck: Deck): Deck {
-  return { ...deck, slides: deck.slides.map(presentationSlide) };
+  return { ...deck, slides: deck.slides.map(presentationSlide), layoutMasters: presentationMasters(deck.layoutMasters) };
+}
+
+/** Layout masters hold objects too, and objects can carry comments. */
+function presentationMasters<T extends Deck['layoutMasters'] | undefined>(masters: T): T {
+  if (!masters) return masters;
+  const shown: Record<string, unknown> = {};
+  for (const [key, master] of Object.entries(masters)) {
+    shown[key] = master && Array.isArray(master.elements)
+      ? { ...master, elements: master.elements.map(presentationElement) }
+      : master;
+  }
+  return shown as T;
 }
 
 function presentationSlide<T extends Deck['slides'][number]>(slide: T): T {
@@ -5186,6 +5198,9 @@ function presentationOps(ops: AgentOperation[]): AgentOperation[] {
       case 'replaceElement':
         shown.push({ ...op, element: presentationElement(op.element) });
         continue;
+      case 'updateDeck':
+        shown.push(op.layoutMasters ? { ...op, layoutMasters: presentationMasters(op.layoutMasters) } : op);
+        continue;
       case 'setSlideProperties': {
         const { notes: _notes, comments: _comments, ...slide } = op.slide as typeof op.slide & { comments?: unknown };
         shown.push({ ...op, slide: slide as typeof op.slide });
@@ -5195,7 +5210,10 @@ function presentationOps(ops: AgentOperation[]): AgentOperation[] {
         shown.push(op);
     }
   }
-  return shown;
+  // An edit that was only comments still has to arrive, to keep the viewer's
+  // sequence; a transaction must carry an operation, so it carries one that
+  // changes nothing.
+  return shown.length > 0 ? shown : [{ op: 'updateDeck' }];
 }
 
 /**

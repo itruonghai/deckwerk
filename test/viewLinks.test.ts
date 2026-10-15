@@ -247,4 +247,55 @@ describe('collab server view-link door', () => {
       expect(everything).not.toContain(secret);
     }
   });
+
+  it('redacts comments on layout masters too, and still delivers comment-only edits as valid frames', async () => {
+    const box = (text: string) => ({
+      id: 'm1', type: 'text', x: 10, y: 10, w: 100, h: 50, html: '<p>Master</p>',
+      comments: [{ id: 'mc', author: 'Rev', text, ts: '2026-10-14T00:00:00Z' }],
+    });
+    const masters = (text: string) => ({
+      freeform: { elements: [box(text)] }, standard: { elements: [] }, title: { elements: [] },
+    });
+    const dir = join(rootDir, 'talk');
+    const { readFile } = await import('node:fs/promises');
+    const deck = JSON.parse(await readFile(join(dir, 'deck.json'), 'utf8'));
+    await saveDeck(dir, parseDeck({ ...deck, layoutMasters: masters('SECRET-MASTER-COMMENT') }));
+
+    const token = tokenOf((await setLink('talk', 'anyone')).body.linkUrl);
+    const cookie = { cookie: cookieFor((await view(`/?deck=talk&view=${token}`)).cookie!) };
+    const frames: string[] = [];
+    const socket = new WebSocket(`ws://127.0.0.1:${server.viewPort}/ws?deck=talk`, { headers: cookie });
+    sockets.push(socket);
+    await new Promise<void>((resolveOpen, reject) => {
+      socket.on('open', () => socket.send(JSON.stringify({ kind: 'hello', version: COLLAB_PROTOCOL_VERSION })));
+      socket.on('message', (raw) => {
+        frames.push(String(raw));
+        if (frames.length === 1) resolveOpen();
+      });
+      socket.on('error', reject);
+    });
+    const welcome = JSON.parse(frames[0]);
+    expect(welcome.deck.layoutMasters.freeform.elements[0].id).toBe('m1');
+
+    const editor = new WebSocket(`ws://127.0.0.1:${server.port}/ws?deck=talk`);
+    sockets.push(editor);
+    await new Promise<void>((resolveOpen) => {
+      editor.on('open', () => editor.send(JSON.stringify({ kind: 'hello', version: COLLAB_PROTOCOL_VERSION })));
+      editor.once('message', () => resolveOpen());
+    });
+    editor.send(JSON.stringify({
+      kind: 'txn', txnId: 't-masters', baseSeq: welcome.seq, label: 'masters',
+      ops: [{ op: 'updateDeck', layoutMasters: masters('SECRET-LIVE-MASTER-COMMENT') }],
+    }));
+    editor.send(JSON.stringify({
+      kind: 'txn', txnId: 't-comment', baseSeq: welcome.seq + 1, label: 'comment',
+      ops: [{ op: 'updateComments', slideId: 's1', base: [], comments: [{ id: 'c9', author: 'Rev', text: 'SECRET-ONLY-COMMENT', ts: '2026-10-14T00:00:02Z' }] }],
+    }));
+    await vi.waitFor(() => expect(frames.filter((frame) => JSON.parse(frame).kind === 'txn')).toHaveLength(2));
+    for (const frame of frames) expect(() => ServerMessageSchema.parse(JSON.parse(frame))).not.toThrow();
+    const everything = frames.join('\n');
+    for (const secret of ['SECRET-MASTER-COMMENT', 'SECRET-LIVE-MASTER-COMMENT', 'SECRET-ONLY-COMMENT']) {
+      expect(everything).not.toContain(secret);
+    }
+  });
 });
