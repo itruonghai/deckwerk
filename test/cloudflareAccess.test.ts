@@ -247,7 +247,9 @@ describe('collab server Cloudflare Access door', () => {
   });
 
   it('closes a live socket when the sign-in it was opened with runs out', async () => {
-    const soon = { 'cf-access-jwt-assertion': token(key, { email: PROF, exp: Math.floor(Date.now() / 1000) + 1 }) };
+    // Past exp but inside the 60 s clock-skew allowance: admitted, and closed
+    // when the allowance runs out, about a second from now.
+    const soon = { 'cf-access-jwt-assertion': token(key, { email: PROF, exp: Math.floor(Date.now() / 1000) - 59 }) };
     expect(await wsResult(server.cloudflarePort!, 'for-prof', soon, true)).toEqual({ welcome: true, closed: 4401 });
   });
 

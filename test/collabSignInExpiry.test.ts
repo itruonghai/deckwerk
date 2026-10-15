@@ -26,15 +26,25 @@ class FakeSocket extends EventTarget {
 
 describe('collab bridge when the sign-in runs out', () => {
   const reload = vi.fn();
-  let configAnswer: { type: string; status: number } | Error;
+  let configAnswer: { type: string; status: number } | Error | 'hang';
 
   beforeEach(() => {
     vi.useFakeTimers();
     FakeSocket.all = [];
     reload.mockReset();
     vi.stubGlobal('WebSocket', FakeSocket);
+    const stored = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (k: string) => stored.get(k) ?? null,
+      setItem: (k: string, v: string) => void stored.set(k, v),
+    });
     vi.stubGlobal('location', { href: 'https://slides.example.com/?deck=d', protocol: 'https:', host: 'slides.example.com', reload });
-    vi.stubGlobal('fetch', vi.fn(async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+      if (configAnswer === 'hang') {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        });
+      }
       if (configAnswer instanceof Error) throw configAnswer;
       return configAnswer;
     }));
@@ -58,6 +68,25 @@ describe('collab bridge when the sign-in runs out', () => {
     bridge();
     FakeSocket.all[0].drop(4401);
     expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('does not reload in a loop when the sign-in keeps being refused', () => {
+    const onStatus = vi.fn();
+    bridge();
+    FakeSocket.all[0].drop(4401);
+    bridge(onStatus);
+    FakeSocket.all[1].drop(4401);
+    expect(reload).toHaveBeenCalledOnce();
+    expect(onStatus).toHaveBeenLastCalledWith('Your sign-in could not be renewed. Reload the page to sign in again.');
+  });
+
+  it('reconnects anyway when the sign-in probe never answers', async () => {
+    configAnswer = 'hang';
+    bridge();
+    FakeSocket.all[0].drop(1006);
+    await vi.advanceTimersByTimeAsync(600 + 5_000);
+    expect(FakeSocket.all).toHaveLength(2);
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('reloads when a dropped socket turns out to be the sign-in redirect', async () => {

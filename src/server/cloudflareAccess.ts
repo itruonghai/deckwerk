@@ -193,7 +193,9 @@ export function createCloudflareAccessVerifier(
     if (typeof payload.email !== 'string' || !payload.email.includes('@')) return null;
     const login = payload.email.trim().toLowerCase(); // as normalizeLogin
     const name = typeof payload.name === 'string' && payload.name.trim() ? payload.name.trim() : login;
-    return { identity: { login, name }, expiresAt: payload.exp * 1000 };
+    // The same tolerance the check above allows: a socket closed any sooner
+    // would reload into the very token it was just refused for.
+    return { identity: { login, name }, expiresAt: (payload.exp + CLOCK_SKEW_S) * 1000 };
   };
 
   return {

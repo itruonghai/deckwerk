@@ -174,8 +174,7 @@ export class CollabBridge {
       // a page load goes through the sign-in again, so load the page.
       if (event.code === COLLAB_CLOSE.signInExpired) {
         this.closed = true;
-        this.hooks.onStatus('Your sign-in has expired — signing in again…');
-        location.reload();
+        signInAgain(this.hooks.onStatus);
         return;
       }
       this.hooks.onStatus(`Disconnected — retrying in ${Math.round(this.reconnectDelay / 1000)}s`);
@@ -194,8 +193,7 @@ export class CollabBridge {
           if (this.closed) return;
           if (lapsed) {
             this.closed = true;
-            this.hooks.onStatus('Your sign-in has expired — signing in again…');
-            location.reload();
+            signInAgain(this.hooks.onStatus);
           } else {
             this.connect();
           }
@@ -513,6 +511,32 @@ function joinNaturalLanguage(items: string[]): string {
   return `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
 }
 
+const SIGN_IN_PROBE_MS = 5_000;
+/** Reloads for a lapsed sign-in closer together than this stop and ask instead. */
+const SIGN_IN_RELOAD_MIN_MS = 60_000;
+const SIGN_IN_RELOAD_KEY = 'deckwerk:signInReloadAt';
+
+/**
+ * Load the page again, which goes through the sign-in. If the last such
+ * reload was only moments ago, the sign-in and the server disagree (a clock
+ * off, a policy changed); reloading again would only loop, so say so instead.
+ */
+function signInAgain(onStatus: (status: string) => void): void {
+  let last = 0;
+  try {
+    last = Number(sessionStorage.getItem(SIGN_IN_RELOAD_KEY)) || 0;
+    sessionStorage.setItem(SIGN_IN_RELOAD_KEY, String(Date.now()));
+  } catch {
+    // No storage: reload anyway; a loop is still bounded by the sign-in page.
+  }
+  if (Date.now() - last < SIGN_IN_RELOAD_MIN_MS) {
+    onStatus('Your sign-in could not be renewed. Reload the page to sign in again.');
+    return;
+  }
+  onStatus('Your sign-in has expired — signing in again…');
+  location.reload();
+}
+
 /**
  * Whether the server is now behind a sign-in this page no longer holds: the
  * request is answered with a redirect (to Cloudflare Access's login) rather
@@ -521,7 +545,12 @@ function joinNaturalLanguage(items: string[]): string {
  */
 async function signInLapsed(): Promise<boolean> {
   try {
-    const response = await fetch('/api/config', { redirect: 'manual', cache: 'no-store', credentials: 'same-origin' });
+    // Bounded: a probe that never answers must not hold up the reconnect.
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), SIGN_IN_PROBE_MS);
+    const response = await fetch('/api/config', {
+      redirect: 'manual', cache: 'no-store', credentials: 'same-origin', signal: abort.signal,
+    }).finally(() => clearTimeout(deadline));
     return response.type === 'opaqueredirect' || response.status === 401;
   } catch {
     return false;
