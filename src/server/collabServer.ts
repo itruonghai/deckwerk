@@ -1761,6 +1761,8 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           ...access,
           linkUrl: deckLinkUrl(deckParam, access),
           anyoneLinks: Boolean(options.viewLinks),
+          // Where people from outside the tailnet sign in, for invitation emails.
+          signInUrl: options.cloudflareAccess?.publicUrl ?? null,
           canManage,
           role: deckRoleFor(identity, access, accessControl),
         } : {
@@ -1899,6 +1901,8 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
             ...next,
             linkUrl: deckLinkUrl(deckParam, next),
             anyoneLinks: Boolean(options.viewLinks),
+          // Where people from outside the tailnet sign in, for invitation emails.
+          signInUrl: options.cloudflareAccess?.publicUrl ?? null,
             canManage: canManageDeck(identity.login, next, accessControl),
             role: deckRoleFor(identity, next, accessControl),
           });

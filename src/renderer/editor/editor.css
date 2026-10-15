@@ -3598,6 +3598,7 @@ button.deck-picker-row.active { border-color: var(--accent); }
 .share-dialog-person-controls { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 .share-dialog-person-controls select { padding: 2px 4px; }
 .share-dialog-person-remove { padding: 0 6px; border: 0; background: none; }
+.share-dialog-person-invite { padding: 0 6px; border: 0; background: none; }
 .share-dialog-role-fixed { flex: none; color: var(--muted, #8a93a6); font-size: 12px; }
 
 .share-dialog-general { display: flex; gap: 6px; align-items: center; }

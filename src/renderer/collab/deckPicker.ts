@@ -869,6 +869,8 @@ interface DeckAccessInfo {
   link?: { role: 'view'; anyone?: boolean } | null;
   /** The server has a no-sign-in view-link address, so `anyone` links can work. */
   anyoneLinks?: boolean;
+  /** Where people off the tailnet sign in (the Cloudflare address), if there is one. */
+  signInUrl?: string | null;
   /** That link, when on; relative unless the server knows its public address. */
   linkUrl?: string | null;
 }
@@ -1040,10 +1042,31 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
         });
         const controls = document.createElement('span');
         controls.className = 'share-dialog-person-controls';
+        if (looksLikeEmail(share.login)) controls.append(inviteButton(share));
         controls.append(role, remove);
         people.append(personRow(share.login, controls));
       }
       syncDatalist();
+    };
+
+    // DeckWerk sends no mail. Inviting someone writes the message in the
+    // person's own mail app, so it comes from them, to someone who knows them.
+    const savedLogins = new Set(info.sharedWith.map((share) => share.login));
+    const inviteButton = (share: DeckShare): HTMLButtonElement => {
+      const invite = document.createElement('button');
+      invite.type = 'button';
+      invite.className = 'share-dialog-person-invite';
+      invite.textContent = '✉';
+      invite.title = `Email ${share.login} an invitation`;
+      invite.setAttribute('aria-label', `Email ${share.login} an invitation`);
+      invite.addEventListener('click', () => {
+        if (!savedLogins.has(share.login)) {
+          onStatus(`Save first, so ${share.login} can open it — then send the invitation`);
+          return;
+        }
+        location.href = invitationMailto(deckId, share, info.signInUrl ?? location.origin);
+      });
+      return invite;
     };
 
     const addEntry = () => {
@@ -1204,7 +1227,9 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
       // plain address, for people already listed.
       const link = linkUrl
         ? new URL(linkUrl, location.origin).href
-        : `${location.origin}/?deck=${encodeURIComponent(deckId)}`;
+        // The address people outside the tailnet can open, when there is one:
+        // a tailnet address copied from here would not open for them.
+        : `${(info.signInUrl ?? location.origin).replace(/\/+$/, '')}/?deck=${encodeURIComponent(deckId)}`;
       void navigator.clipboard?.writeText(link)
         .then(() => onStatus(`Copied the link to “${deckId}”`))
         // A clipboard a browser will not hand over is not a failure worth a
@@ -1256,4 +1281,25 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
   box.append(title, body, actions);
   overlay.append(box);
   document.body.append(overlay);
+}
+
+function looksLikeEmail(login: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(login);
+}
+
+/** A ready-to-send invitation in the sender's own mail app. */
+export function invitationMailto(deckId: string, share: { login: string; role: 'edit' | 'view' }, base: string): string {
+  const link = `${base.replace(/\/+$/, '')}/?deck=${encodeURIComponent(deckId)}`;
+  const can = share.role === 'edit' ? 'view and edit' : 'view';
+  const subject = `Slides: ${deckId}`;
+  const body = [
+    'Hi,',
+    '',
+    `I've shared the slides "${deckId}" with you. You can ${can} them here:`,
+    '',
+    link,
+    '',
+    `Sign in with this email address (${share.login}): you'll get a one-time login code by email. No account or app needed.`,
+  ].join('\n');
+  return `mailto:${encodeURIComponent(share.login)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }

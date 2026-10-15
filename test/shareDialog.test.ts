@@ -11,7 +11,7 @@
  * wrong one is worse than none.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { showShareDialog } from '../src/renderer/collab/deckPicker.js';
+import { invitationMailto, showShareDialog } from '../src/renderer/collab/deckPicker.js';
 
 const OWNER = 'alice@tailnet.example';
 const BOB = 'bob@tailnet.example';
@@ -228,5 +228,17 @@ describe('share dialog', () => {
     expect(JSON.parse(String(put[1]!.body))).toEqual({ link: 'anyone' });
     document.querySelector<HTMLButtonElement>('.share-dialog-copy')!.click();
     await vi.waitFor(() => expect(written).toEqual(['https://view.example.com/?deck=talk&view=anyone-secret']));
+  });
+
+  it('writes invitations and copied links on the public sign-in address', async () => {
+    const written: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async (text: string) => void written.push(text) } });
+    await openDialog({ signInUrl: 'https://slides.example.com', sharedWith: [{ login: 'prof@uni.example', role: 'view' }] } as Partial<typeof ACCESS>);
+    document.querySelector<HTMLButtonElement>('.share-dialog-copy')!.click();
+    await vi.waitFor(() => expect(written).toEqual(['https://slides.example.com/?deck=talk']));
+    const mail = invitationMailto('talk', { login: 'prof@uni.example', role: 'view' }, 'https://slides.example.com');
+    expect(mail.startsWith('mailto:prof%40uni.example?')).toBe(true);
+    expect(decodeURIComponent(mail)).toContain('https://slides.example.com/?deck=talk');
+    expect(document.querySelector('.share-dialog-person-invite')).not.toBeNull();
   });
 });
