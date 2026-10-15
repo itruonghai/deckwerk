@@ -6,7 +6,7 @@ import { lookup } from 'node:dns/promises';
 import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { createServer as createNetServer, isIP, type Server as NetServer, type Socket } from 'node:net';
@@ -88,6 +88,7 @@ import {
   canManageDeck,
   deckRoleFor,
   folderVisibleTo,
+  isGuest,
   normalizeLogin,
   normalizeShares,
   readDeckAccess,
@@ -324,8 +325,10 @@ export interface CollabServerOptions {
    * loopback listener on `port` for a Cloudflare Tunnel, where identity is
    * the Cloudflare Access token, checked against `teamDomain` and `audience`.
    * Needs `accessControl`. `verifier` replaces the real key fetch in tests.
+   * `publicUrl` (e.g. https://slides.example.com) is where guests open the
+   * server; deck share links are written against it.
    */
-  cloudflareAccess?: CloudflareAccessConfig & { port: number; verifier?: CloudflareAccessVerifier };
+  cloudflareAccess?: CloudflareAccessConfig & { port: number; publicUrl?: string; verifier?: CloudflareAccessVerifier };
   /**
    * Called when the host requests the session end (POST /api/end from
    * loopback in a hosted session). The owner tears the server down; the
@@ -620,7 +623,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     }
     if (accessControl && identity) {
       const access = await readDeckAccess(dir, accessControl);
-      const role = deckRoleFor(identity.login, access, accessControl);
+      const role = deckRoleFor(identity, access, accessControl);
       if (!role) return null;
       listed.owner = access.owner;
       listed.visibility = access.visibility;
@@ -828,7 +831,42 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     // would resolve to a directory with no sidecar of its own — which reads
     // as public — and hand out the private deck's insides.
     if (!isDeckDir(deckDir) && existsSync(deckDir)) return null;
-    return deckRoleFor(identity.login, await readDeckAccess(deckDir, accessControl), accessControl);
+    return deckRoleFor(identity, await readDeckAccess(deckDir, accessControl), accessControl);
+  }
+
+  /**
+   * The deck's "anyone with the link" address: on the guests' public URL when
+   * there is one, else relative to wherever the person managing it is.
+   */
+  const deckLinkUrl = (deckId: string, access: DeckAccess): string | null => {
+    if (!access.link) return null;
+    const query = `?deck=${encodeURIComponent(deckId)}&invite=${access.link.token}`;
+    const base = options.cloudflareAccess?.publicUrl?.replace(/\/+$/, '') ?? '';
+    return `${base}/${query}`;
+  };
+
+  /**
+   * Open a deck through its "anyone with the link" secret: a person who has
+   * no role on it yet becomes a named viewer. Someone who already has a role
+   * keeps it (a link never demotes); a wrong or retired secret does nothing,
+   * and the deck check that follows refuses as usual.
+   */
+  async function redeemDeckLink(identity: Identity, deckId: string, invite: string): Promise<void> {
+    if (!accessControl) return;
+    let deckDir: string;
+    try {
+      deckDir = deckDirOf(deckId);
+    } catch {
+      return;
+    }
+    if (!isDeckDir(deckDir)) return;
+    const access = await readDeckAccess(deckDir, accessControl);
+    if (!access.link || !sameSecret(access.link.token, invite)) return;
+    if (deckRoleFor(identity, access, accessControl)) return;
+    await writeDeckAccess(deckDir, {
+      ...access,
+      sharedWith: normalizeShares([...access.sharedWith, { login: identity.login, role: access.link.role }]),
+    });
   }
 
   /** Whether this identity may touch the deck at all; access control off = yes. */
@@ -920,7 +958,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
   ): Promise<{ visible: boolean; editable: boolean }> {
     if (!accessControl || !identity) return { visible: true, editable: true };
     if (isDeckDir(dir)) {
-      const role = deckRoleFor(identity.login, await readDeckAccess(dir, accessControl), accessControl);
+      const role = deckRoleFor(identity, await readDeckAccess(dir, accessControl), accessControl);
       return { visible: role !== null, editable: role === 'owner' || role === 'edit' };
     }
     const owner = await readFolderOwner(dir, accessControl);
@@ -1404,6 +1442,14 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     }
     if (identity && userDirectory) void userDirectory.note(identity);
 
+    // A guest from the internet (the Cloudflare door) works only inside decks
+    // shared with them. Everything that reaches beyond one deck — creating,
+    // importing, moving, the trash, the list of everyone on this server — is
+    // for the people on the tailnet.
+    if (accessControl && identity && isGuest(identity, accessControl) && guestForbidden(path, request.method ?? 'GET')) {
+      return respondJson(response, 403, { error: 'guests can open what is shared with them, but not this' });
+    }
+
     /**
      * The access sidecar for a freshly imported deck.
      *
@@ -1416,7 +1462,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     async function writeImportedDeckAccess(dir: string): Promise<void> {
       if (!accessControl || !identity) return;
       await writeDeckAccess(dir, {
-        owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'view',
+        owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'view', link: null,
       });
     }
     // A malformed deck id is answered once, here, rather than becoming a 500
@@ -1424,6 +1470,11 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
     if (deckParam && !splitDeckPath(deckParam)) {
       return respondJson(response, 400, { error: 'invalid deck id' });
     }
+    // "Anyone with the link can view": opening the deck with its link secret
+    // makes this person a named viewer, so every later request — and the
+    // owner's Share… list — knows them like anyone shared by email.
+    const invite = url.searchParams.get('invite');
+    if (accessControl && identity && deckParam && invite) await redeemDeckLink(identity, deckParam, invite);
     if (deckParam && !(await deckAllowed(identity, deckParam))) {
       return respondJson(response, 403, { error: 'you do not have access to this deck' });
     }
@@ -1658,8 +1709,11 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       if (request.method === 'GET') {
         respondJson(response, 200, {
           ...access,
+          // The link is a secret of the people who manage the deck.
+          link: canManage ? access.link : null,
+          linkUrl: canManage ? deckLinkUrl(deckParam, access) : null,
           canManage,
-          role: deckRoleFor(identity.login, access, accessControl),
+          role: deckRoleFor(identity, access, accessControl),
         });
         return;
       }
@@ -1668,7 +1722,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           return respondJson(response, 403, { error: 'only the deck owner or the admin can change access' });
         }
         let payload: {
-          visibility?: unknown; sharedWith?: unknown; owner?: unknown; publicRole?: unknown;
+          visibility?: unknown; sharedWith?: unknown; owner?: unknown; publicRole?: unknown; link?: unknown;
         };
         try {
           payload = JSON.parse((await readBody(request)).toString('utf8') || '{}') as typeof payload;
@@ -1707,6 +1761,16 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
           }
           next.sharedWith = normalizeShares(rows);
         }
+        if (payload.link !== undefined) {
+          // 'on' keeps an existing secret (so a link already sent still works),
+          // 'reset' retires it for a new one, 'off' retires it.
+          if (payload.link !== 'on' && payload.link !== 'off' && payload.link !== 'reset') {
+            return respondJson(response, 400, { error: 'link must be "on", "off" or "reset"' });
+          }
+          next.link = payload.link === 'off'
+            ? null
+            : payload.link === 'on' && access.link ? access.link : { token: newLinkToken(), role: 'view' };
+        }
         if (payload.owner !== undefined) {
           // Transferring ownership is an admin act: an owner "giving a deck
           // away" by typo would silently lock themselves out.
@@ -1726,16 +1790,17 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
         // back to reload into the read-only page.
         for (const peer of rooms.get(deckParam)?.peers.values() ?? []) {
           if (!peer.identity) continue;
-          if (!canAccessDeck(peer.identity.login, next, accessControl)) {
+          if (!canAccessDeck(peer.identity, next, accessControl)) {
             peer.socket.close(4003, 'your access to this deck was revoked');
-          } else if (peer.canEdit && !canEditDeck(peer.identity.login, next, accessControl)) {
+          } else if (peer.canEdit && !canEditDeck(peer.identity, next, accessControl)) {
             peer.socket.close(4003, 'your access to this deck is now view-only — reload to keep watching');
           }
         }
         respondJson(response, 200, {
           ...next,
+          linkUrl: deckLinkUrl(deckParam, next),
           canManage: canManageDeck(identity.login, next, accessControl),
-          role: deckRoleFor(identity.login, next, accessControl),
+          role: deckRoleFor(identity, next, accessControl),
         });
         return;
       }
@@ -2108,7 +2173,7 @@ export async function startCollabServer(options: CollabServerOptions): Promise<R
       // take an explicit act, not the absence of one.
       if (accessControl && identity) {
         await writeDeckAccess(dir, {
-          owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'edit',
+          owner: identity.login, visibility: 'private', sharedWith: [], publicRole: 'edit', link: null,
         });
       }
       respondJson(response, 200, { id });
@@ -4939,4 +5004,28 @@ export function defaultClientDir(repoRoot: string): string | undefined {
     base = parent;
   }
   return undefined;
+}
+
+/** Routes a guest (see isGuest) may not use: anything beyond the decks shared with them. */
+const GUEST_FORBIDDEN_ANY = new Set(['/api/users', '/api/trash', '/api/trash/restore']);
+const GUEST_FORBIDDEN_WRITES = new Set([
+  '/api/decks', '/api/decks/move', '/api/decks/rename',
+  '/api/folders', '/api/folders/rename',
+  '/api/import-keynote', '/api/import-pptx', '/api/import-deck',
+]);
+
+function guestForbidden(path: string, method: string): boolean {
+  if (GUEST_FORBIDDEN_ANY.has(path)) return true;
+  return method !== 'GET' && method !== 'HEAD' && GUEST_FORBIDDEN_WRITES.has(path);
+}
+
+/** A fresh link secret: 144 bits, URL-safe. */
+function newLinkToken(): string {
+  return randomBytes(18).toString('base64url');
+}
+
+function sameSecret(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
 }

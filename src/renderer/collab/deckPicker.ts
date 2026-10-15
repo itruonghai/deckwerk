@@ -865,6 +865,10 @@ interface DeckAccessInfo {
   sharedWith: DeckShare[];
   canManage: boolean;
   role: 'owner' | 'edit' | 'view' | null;
+  /** "Anyone with the link can view" is on (only told to people who manage the deck). */
+  link?: { role: 'view' } | null;
+  /** That link, when on; relative unless the server knows its public address. */
+  linkUrl?: string | null;
 }
 
 const ROLE_LABEL: Record<'edit' | 'view', string> = {
@@ -923,7 +927,7 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
         ? 'You can view it, but not change it.'
         : 'You can edit it.';
       note.textContent = `${info.visibility === 'public'
-        ? 'This presentation is public: everyone on this server can open it.'
+        ? 'This presentation is public: everyone on the tailnet can open it.'
         : 'This presentation is private; the owner shared it with you.'} ${what}`;
       body.append(ownerLine, note);
       return;
@@ -954,7 +958,7 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
     const addRow = document.createElement('div');
     addRow.className = 'share-dialog-add';
     const entry = document.createElement('input');
-    entry.placeholder = knownUsers.length > 0 ? 'Add people by name or login…' : 'tailnet login, e.g. alice@example.com';
+    entry.placeholder = knownUsers.length > 0 ? 'Add people by name, login or email…' : 'login or email, e.g. alice@example.com';
     entry.setAttribute('list', 'share-known-users');
     const newRole = document.createElement('select');
     for (const value of ['edit', 'view'] as const) {
@@ -1079,7 +1083,7 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
     const visibility = document.createElement('select');
     for (const [value, label] of [
       ['private', 'Restricted'],
-      ['public', 'Everyone on this server'],
+      ['public', 'Everyone on the tailnet'],
     ] as const) {
       const option = document.createElement('option');
       option.value = value;
@@ -1106,14 +1110,72 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
       publicRole.hidden = !isPublic;
       generalNote.textContent = isPublic
         ? (publicRole.value === 'view'
-          ? 'Anyone on this server can open it. Only the people listed above can change it.'
-          : 'Anyone on this server can open and change it.')
+          ? 'Anyone on the tailnet can open it. Only the people listed above can change it.'
+          : 'Anyone on the tailnet can open and change it.')
         : 'Only the people listed above can open it.';
     };
     visibility.addEventListener('change', syncGeneralAccess);
     publicRole.addEventListener('change', syncGeneralAccess);
 
+    // Anyone with the link: a secret address. Whoever opens it signs in (with
+    // their email, through the Cloudflare door) and is added above as a
+    // viewer. Switched on and off straight away rather than on Save, so the
+    // link can be copied the moment it exists.
+    let linkUrl = info.linkUrl ?? null;
+    const linkRow = document.createElement('div');
+    linkRow.className = 'share-dialog-general share-dialog-link';
+    const linkMode = document.createElement('select');
+    for (const [value, label] of [['off', 'Off'], ['on', 'Anyone with the link can view']] as const) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = (linkUrl !== null) === (value === 'on');
+      linkMode.append(option);
+    }
+    linkMode.title = 'Let people open this presentation, view-only, with a secret link';
+    const resetLink = document.createElement('button');
+    resetLink.type = 'button';
+    resetLink.textContent = 'Reset link';
+    resetLink.title = 'Make a new link; the old one stops working (people already added stay)';
+    linkRow.append(linkMode, resetLink);
+    const linkNote = document.createElement('p');
+    linkNote.className = 'share-dialog-note';
+    const syncLink = () => {
+      linkMode.value = linkUrl ? 'on' : 'off';
+      resetLink.hidden = !linkUrl;
+      linkNote.textContent = linkUrl
+        ? 'Whoever opens the link signs in with their email and is added above as a viewer. '
+          + 'Remove anyone there; reset the link to stop it working.'
+        : 'Only the people listed above can open it with a link.';
+    };
+    const setLink = async (mode: 'on' | 'off' | 'reset') => {
+      linkMode.disabled = true;
+      resetLink.disabled = true;
+      try {
+        const saved = await fetch(`/api/access?deck=${encodeURIComponent(deckId)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ link: mode }),
+        });
+        const result = await saved.json() as { error?: string; linkUrl?: string | null };
+        if (!saved.ok) throw new Error(result.error ?? `link change failed (${saved.status})`);
+        linkUrl = result.linkUrl ?? null;
+        onStatus(mode === 'off' ? 'Link sharing is off' : mode === 'reset' ? 'Made a new link; the old one no longer works'
+          : 'Anyone with the link can view — Copy link to send it');
+      } catch (error) {
+        onStatus(`Link sharing failed: ${error instanceof Error ? error.message : error}`);
+      } finally {
+        linkMode.disabled = false;
+        resetLink.disabled = false;
+        syncLink();
+      }
+    };
+    linkMode.addEventListener('change', () => void setLink(linkMode.value === 'on' ? 'on' : 'off'));
+    resetLink.addEventListener('click', () => void setLink('reset'));
+    syncLink();
+
     const generalSection = section('General access', generalRow, generalNote);
+    const linkSection = section('Link', linkRow, linkNote);
 
     renderPeople();
     syncGeneralAccess();
@@ -1125,7 +1187,11 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
     copyLink.className = 'share-dialog-copy';
     copyLink.textContent = 'Copy link';
     copyLink.addEventListener('click', () => {
-      const link = `${location.origin}/?deck=${encodeURIComponent(deckId)}`;
+      // With link sharing on, the link that lets people in; otherwise the
+      // plain address, for people already listed.
+      const link = linkUrl
+        ? new URL(linkUrl, location.origin).href
+        : `${location.origin}/?deck=${encodeURIComponent(deckId)}`;
       void navigator.clipboard?.writeText(link)
         .then(() => onStatus(`Copied the link to “${deckId}”`))
         // A clipboard a browser will not hand over is not a failure worth a
@@ -1164,7 +1230,7 @@ export function showShareDialog(deckId: string, onStatus: (text: string) => void
       });
     });
 
-    body.append(peopleSection, generalSection);
+    body.append(peopleSection, generalSection, linkSection);
     actions.prepend(copyLink);
     actions.append(save);
   })().catch((error) => {

@@ -10,7 +10,7 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  *     [--no-local-agents] [--agent-name <name>] [--access <adminLogin>]
  *     [--keep-uploads-days <n>]
  *     [--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag>
- *      [--cloudflare-port 5801]]
+ *      [--cloudflare-port 5801] [--public-url https://slides.example.com]]
  *
  * Every Keynote and PowerPoint upload is kept for --keep-uploads-days (30 by
  * default, 0 turns it off) under <decksRootDir>/.uploads/, so an import that
@@ -59,6 +59,7 @@ let keepUploadsDays = 30;
 let cloudflareTeam: string | null = null;
 let cloudflareAud: string | null = null;
 let cloudflarePort = 5801;
+let publicUrl: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
@@ -69,19 +70,22 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--cloudflare-team') cloudflareTeam = args[++i];
   else if (args[i] === '--cloudflare-aud') cloudflareAud = args[++i];
   else if (args[i] === '--cloudflare-port') cloudflarePort = Number(args[++i]);
+  else if (args[i] === '--public-url') publicUrl = args[++i];
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
 const cloudflareRequested = cloudflareTeam !== null || cloudflareAud !== null;
 if (
   !rootDir || Number.isNaN(port) || !(keepUploadsDays >= 0) || (accessAdmin !== null && !accessAdmin?.trim())
   || (cloudflareRequested && (!cloudflareTeam?.trim() || !cloudflareAud?.trim() || !accessAdmin
-    || !Number.isInteger(cloudflarePort) || cloudflarePort <= 0 || cloudflarePort === port))
+    || !Number.isInteger(cloudflarePort) || cloudflarePort <= 0 || cloudflarePort === port
+    || (publicUrl !== undefined && !/^https:\/\/[^/\s]+\/?$/.test(publicUrl))))
 ) {
   process.stderr.write(
     'usage: npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0] '
     + '[--no-local-agents] [--agent-name <name>] '
     + '[--access <adminLogin>] [--keep-uploads-days <n>] '
-    + '[--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag> [--cloudflare-port 5801]]\n'
+    + '[--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag> [--cloudflare-port 5801] '
+    + '[--public-url https://slides.example.com]]\n'
     + (cloudflareRequested ? '  (--cloudflare-team and --cloudflare-aud go together, need --access, '
       + 'and --cloudflare-port must differ from --port)\n' : ''),
   );
@@ -121,7 +125,7 @@ const server = await startCollabServer({
   localAgents,
   accessControl: accessAdmin ? { admin: accessAdmin } : undefined,
   cloudflareAccess: cloudflareRequested
-    ? { teamDomain: cloudflareTeam!, audience: cloudflareAud!, port: cloudflarePort }
+    ? { teamDomain: cloudflareTeam!, audience: cloudflareAud!, port: cloudflarePort, publicUrl }
     : undefined,
   keepUploadsDays,
 });
@@ -132,7 +136,7 @@ process.stdout.write(`${JSON.stringify({
   accessControl: accessAdmin ? { admin: accessAdmin } : null,
   cloudflareAccess: server.cloudflarePort === undefined
     ? null
-    : { teamDomain: normalizeTeamDomain(cloudflareTeam!), port: server.cloudflarePort },
+    : { teamDomain: normalizeTeamDomain(cloudflareTeam!), port: server.cloudflarePort, publicUrl: publicUrl ?? null },
   clientBundle: clientDir ?? null,
   localAgents: Boolean(localAgents),
   urls: server.urls,

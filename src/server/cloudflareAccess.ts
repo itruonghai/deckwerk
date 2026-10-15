@@ -195,7 +195,7 @@ export function createCloudflareAccessVerifier(
     const name = typeof payload.name === 'string' && payload.name.trim() ? payload.name.trim() : login;
     // The same tolerance the check above allows: a socket closed any sooner
     // would reload into the very token it was just refused for.
-    return { identity: { login, name }, expiresAt: (payload.exp + CLOCK_SKEW_S) * 1000 };
+    return { identity: { login, name, external: true }, expiresAt: (payload.exp + CLOCK_SKEW_S) * 1000 };
   };
 
   return {

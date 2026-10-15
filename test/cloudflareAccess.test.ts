@@ -63,7 +63,7 @@ describe('Cloudflare Access token check', () => {
     const certs = certsEndpoint([key]);
     const verifier = createCloudflareAccessVerifier({ teamDomain: TEAM, audience: AUD }, { fetch: certs.fetch });
     expect(await verifier.verifyToken(token(key, { email: 'Prof@University.Example' })))
-      .toEqual({ login: PROF, name: PROF });
+      .toEqual({ login: PROF, name: PROF, external: true });
     expect(certs.calls).toEqual([`https://${TEAM}/cdn-cgi/access/certs`]);
     // Keys are kept, not fetched per request.
     await verifier.verifyToken(token(key, { email: PROF }));
@@ -196,6 +196,7 @@ describe('collab server Cloudflare Access door', () => {
     rootDir = await mkdtemp(join(tmpdir(), 'collab-cloudflare-'));
     await seedDeck('private', { owner: ADMIN, visibility: 'private', sharedWith: [] });
     await seedDeck('for-prof', { owner: ADMIN, visibility: 'private', sharedWith: [{ login: PROF, role: 'view' }] });
+    await seedDeck('legacy'); // no sidecar: public to the tailnet, editable
     server = await startCollabServer({
       rootDir,
       port: 0,
@@ -206,6 +207,7 @@ describe('collab server Cloudflare Access door', () => {
         teamDomain: TEAM,
         audience: AUD,
         port: 0,
+        publicUrl: 'https://slides.example.com',
         verifier: createCloudflareAccessVerifier({ teamDomain: TEAM, audience: AUD }, { fetch: certsEndpoint([key]).fetch }),
       },
     });
@@ -237,6 +239,66 @@ describe('collab server Cloudflare Access door', () => {
     expect((await get(port, '/api/deck?deck=for-prof', as(PROF))).status).toBe(200);
     // The admin signing in through Cloudflare with the admin email is the admin.
     expect((await get(port, '/api/config', as(ADMIN))).body.access).toMatchObject({ user: ADMIN, admin: true });
+  });
+
+  it('treats people from the internet as guests: no public decks, nothing beyond their decks', async () => {
+    const port = server.cloudflarePort!;
+    expect(((await get(port, '/api/decks', as(PROF))).body as any[]).map((deck) => deck.id)).toEqual(['for-prof']);
+    expect((await get(port, '/api/deck?deck=legacy', as(PROF))).status).toBe(403);
+    expect((await get(port, '/api/users', as(PROF))).status).toBe(403);
+    expect((await get(port, '/api/trash', as(PROF))).status).toBe(403);
+    const create = await fetch(`http://127.0.0.1:${port}/api/decks?name=mine`, { method: 'POST', headers: as(PROF) });
+    expect(create.status).toBe(403);
+    // On the tailnet "public" still means public.
+    expect((await get(server.port, '/api/deck?deck=legacy', { 'tailscale-user-login': PROF })).status).toBe(200);
+    // The admin is the admin through either door.
+    expect(((await get(port, '/api/decks', as(ADMIN))).body as any[]).map((deck) => deck.id)).toContain('legacy');
+  });
+
+  it('lets anyone with the link in as a named viewer, until the link is reset', async () => {
+    const port = server.cloudflarePort!;
+    const put = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/access?deck=private`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (response) => ({ status: response.status, body: await response.json() as any }));
+
+    const on = await put({ link: 'on' });
+    expect(on.status).toBe(200);
+    const link = new URL(on.body.linkUrl);
+    expect(link.origin).toBe('https://slides.example.com');
+    const invite = link.searchParams.get('invite')!;
+    expect(invite.length).toBeGreaterThanOrEqual(20);
+    // 'on' again keeps the link already sent.
+    expect((await put({ link: 'on' })).body.linkUrl).toBe(on.body.linkUrl);
+
+    const stranger = 'stranger@elsewhere.example';
+    expect((await get(port, `/api/deck?deck=private&invite=${invite.slice(0, -1)}x`, as(stranger))).status).toBe(403);
+    expect((await get(port, `/?deck=private&invite=${invite}`, as(stranger))).status).not.toBe(403);
+    // Now a named viewer: no invite needed, and listed for the owner.
+    expect((await get(port, '/api/deck?deck=private', as(stranger))).status).toBe(200);
+    const access = (await get(server.port, '/api/access?deck=private')).body;
+    expect(access.sharedWith).toContainEqual({ login: stranger, role: 'view' });
+    // A viewer neither edits nor learns the link.
+    const viewerAccess = (await get(port, '/api/access?deck=private', as(stranger))).body;
+    expect(viewerAccess).toMatchObject({ role: 'view', link: null, linkUrl: null });
+    const write = await fetch(`http://127.0.0.1:${port}/api/access?deck=private`, {
+      method: 'PUT', headers: { ...as(stranger), 'content-type': 'application/json' }, body: JSON.stringify({ link: 'off' }),
+    });
+    expect(write.status).toBe(403);
+
+    // Reset: the old link lets nobody new in.
+    expect((await put({ link: 'reset' })).body.linkUrl).not.toBe(on.body.linkUrl);
+    expect((await get(port, `/api/deck?deck=private&invite=${invite}`, as('late@elsewhere.example'))).status).toBe(403);
+    expect((await put({ link: 'off' })).body.linkUrl).toBeNull();
+  });
+
+  it('never demotes someone who already has more than the link gives', async () => {
+    const port = server.cloudflarePort!;
+    await writeFile(join(rootDir, 'for-prof', 'access.json'), JSON.stringify({
+      owner: ADMIN, visibility: 'private', sharedWith: [{ login: PROF, role: 'edit' }],
+      publicRole: 'view', link: { token: 'a'.repeat(24), role: 'view' },
+    }), 'utf8');
+    await get(port, `/?deck=for-prof&invite=${'a'.repeat(24)}`, as(PROF));
+    expect((await get(port, '/api/access?deck=for-prof', as(PROF))).body.role).toBe('edit');
   });
 
   it('checks the token on the WebSocket too', async () => {

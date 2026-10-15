@@ -32,9 +32,11 @@ async function openDialog(access: Partial<typeof ACCESS> = {}): Promise<{ status
   const status: string[] = [];
   const info = { ...ACCESS, ...access };
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const sent = init?.method === 'PUT' ? JSON.parse(String(init.body)) as { link?: string } : null;
     const json = input.startsWith('/api/users') ? USERS
-      : init?.method === 'PUT' ? {}
-        : info;
+      : sent?.link ? { linkUrl: sent.link === 'off' ? null : `https://slides.example.com/?deck=talk&invite=${sent.link}-secret` }
+        : sent ? {}
+          : info;
     return new Response(JSON.stringify(json), {
       status: 200, headers: { 'content-type': 'application/json' },
     });
@@ -69,7 +71,7 @@ describe('share dialog', () => {
 
   it('shows people above general access', async () => {
     await openDialog();
-    expect(sectionNames()).toEqual(['People with access', 'General access']);
+    expect(sectionNames()).toEqual(['People with access', 'General access', 'Link']);
   });
 
   it('lists the owner as a person, not as a caption', async () => {
@@ -95,12 +97,12 @@ describe('share dialog', () => {
 
     expect(publicRole.hidden).toBe(false);
     expect(note())
-      .toBe('Anyone on this server can open it. Only the people listed above can change it.');
+      .toBe('Anyone on the tailnet can open it. Only the people listed above can change it.');
   });
 
   it('says plainly when public means anyone can change it', async () => {
     await openDialog({ visibility: 'public', publicRole: 'edit' });
-    expect(note()).toBe('Anyone on this server can open and change it.');
+    expect(note()).toBe('Anyone on the tailnet can open and change it.');
   });
 
   it('rewrites the sentence as the controls change', async () => {
@@ -114,7 +116,7 @@ describe('share dialog', () => {
 
     publicRole.value = 'edit';
     publicRole.dispatchEvent(new Event('change'));
-    expect(note()).toBe('Anyone on this server can open and change it.');
+    expect(note()).toBe('Anyone on the tailnet can open and change it.');
 
     visibility.value = 'private';
     visibility.dispatchEvent(new Event('change'));
@@ -173,5 +175,30 @@ describe('share dialog', () => {
 
     expect(document.body.textContent).toContain('You can view it, but not change it.');
     expect(document.querySelector('.share-dialog-general')).toBeNull();
+  });
+
+  it('turns "anyone with the link can view" on, copies that link, and resets it', async () => {
+    const written: string[] = [];
+    vi.stubGlobal('navigator', { clipboard: { writeText: async (text: string) => void written.push(text) } });
+    const { status } = await openDialog();
+    const mode = document.querySelector<HTMLSelectElement>('.share-dialog-link select')!;
+    const reset = [...document.querySelectorAll<HTMLButtonElement>('.share-dialog-link button')]
+      .find((button) => button.textContent === 'Reset link')!;
+    expect(mode.value).toBe('off');
+    expect(reset.hidden).toBe(true);
+
+    mode.value = 'on';
+    mode.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(reset.hidden).toBe(false));
+    expect(status.at(-1)).toMatch(/Anyone with the link can view/);
+
+    const copy = document.querySelector<HTMLButtonElement>('.share-dialog-copy')!;
+    copy.click();
+    await vi.waitFor(() => expect(written).toEqual(['https://slides.example.com/?deck=talk&invite=on-secret']));
+
+    reset.click();
+    await vi.waitFor(() => expect(status.at(-1)).toMatch(/old one no longer works/));
+    copy.click();
+    await vi.waitFor(() => expect(written.at(-1)).toBe('https://slides.example.com/?deck=talk&invite=reset-secret'));
   });
 });

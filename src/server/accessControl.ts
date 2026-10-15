@@ -49,6 +49,27 @@ export interface Identity {
   login: string;
   /** Human display name for presence and comments. */
   name: string;
+  /**
+   * Signed in through the Cloudflare door rather than the tailnet: a guest
+   * from the internet. Guests get what is shared with them by name or by
+   * the deck's link, never what "public" gives everyone on the tailnet.
+   */
+  external?: boolean;
+}
+
+/**
+ * Who a permission question is about: a bare login (a tailnet person, as
+ * every caller before the Cloudflare door), or a full identity.
+ */
+export type Subject = string | Identity;
+
+function subjectLogin(who: Subject): string {
+  return typeof who === 'string' ? who : who.login;
+}
+
+/** A guest, unless they are the admin (whose email is theirs on either door). */
+export function isGuest(who: Subject, config: AccessControlConfig): boolean {
+  return typeof who !== 'string' && who.external === true && who.login !== normalizeLogin(config.admin);
 }
 
 /** What a grant lets somebody do. `view` never writes: not a byte. */
@@ -68,8 +89,14 @@ export interface DeckAccess {
    * those read back as `edit`, which is what sharing meant then.
    */
   sharedWith: DeckShare[];
-  /** What `visibility: "public"` grants everyone else on the server. */
+  /** What `visibility: "public"` grants everyone else on the tailnet. */
   publicRole: AccessRole;
+  /**
+   * "Anyone with the link can view": whoever opens the deck with this secret
+   * (`?invite=`) is added to `sharedWith` as a viewer, so they show up in
+   * Share… and can be removed there. Null when link sharing is off.
+   */
+  link: { token: string; role: 'view' } | null;
 }
 
 /** A deck's owner (or the admin) outranks both share roles. */
@@ -158,6 +185,7 @@ export async function readDeckAccess(deckDir: string, config: AccessControlConfi
     // Public used to mean "everyone can edit it", and a sidecar-less deck is
     // exactly the pre-roles case, so that is what it keeps meaning.
     publicRole: 'edit',
+    link: null,
   };
   let raw: string;
   try {
@@ -174,12 +202,20 @@ export async function readDeckAccess(deckDir: string, config: AccessControlConfi
       visibility: parsed.visibility === 'private' ? 'private' : 'public',
       sharedWith: normalizeShares(parsed.sharedWith),
       publicRole: asRole(parsed.publicRole, 'edit'),
+      link: readLink(parsed.link),
     };
   } catch {
     // A corrupt sidecar must not lock the admin out of the deck; treating it
     // as absent (public) is the recoverable failure mode.
     return fallback;
   }
+}
+
+function readLink(value: unknown): DeckAccess['link'] {
+  if (!value || typeof value !== 'object') return null;
+  const token = (value as { token?: unknown }).token;
+  // Short or odd tokens would be guessable; treat them as no link at all.
+  return typeof token === 'string' && /^[A-Za-z0-9_-]{20,}$/.test(token) ? { token, role: 'view' } : null;
 }
 
 export async function writeDeckAccess(deckDir: string, access: DeckAccess): Promise<void> {
@@ -192,26 +228,28 @@ export async function writeDeckAccess(deckDir: string, access: DeckAccess): Prom
  * share and the public setting wins.
  */
 export function deckRoleFor(
-  login: string,
+  who: Subject,
   access: DeckAccess,
   config: AccessControlConfig,
 ): DeckRole | null {
+  const login = subjectLogin(who);
   if (login === normalizeLogin(config.admin) || access.owner === login) return 'owner';
   const granted: AccessRole[] = [];
   const share = access.sharedWith.find((entry) => entry.login === login);
   if (share) granted.push(share.role);
-  if (access.visibility === 'public') granted.push(access.publicRole);
+  // "Public" is everyone on the tailnet. A guest from the internet is not.
+  if (access.visibility === 'public' && !isGuest(who, config)) granted.push(access.publicRole);
   if (granted.length === 0) return null;
   return granted.includes('edit') ? 'edit' : 'view';
 }
 
-export function canAccessDeck(login: string, access: DeckAccess, config: AccessControlConfig): boolean {
-  return deckRoleFor(login, access, config) !== null;
+export function canAccessDeck(who: Subject, access: DeckAccess, config: AccessControlConfig): boolean {
+  return deckRoleFor(who, access, config) !== null;
 }
 
 /** Whether this person may change the deck — transactions, uploads, the agent. */
-export function canEditDeck(login: string, access: DeckAccess, config: AccessControlConfig): boolean {
-  const role = deckRoleFor(login, access, config);
+export function canEditDeck(who: Subject, access: DeckAccess, config: AccessControlConfig): boolean {
+  const role = deckRoleFor(who, access, config);
   return role === 'owner' || role === 'edit';
 }
 

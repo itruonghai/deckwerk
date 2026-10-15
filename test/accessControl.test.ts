@@ -31,8 +31,8 @@ const CONFIG = { admin: ADMIN };
 
 const share = (login: string, role: 'edit' | 'view' = 'edit') => ({ login, role });
 const deckAccess = (partial: Partial<DeckAccess> & { owner: string }): DeckAccess => ({
-  visibility: 'private', sharedWith: [], publicRole: 'edit', ...partial,
-});
+  visibility: 'private', sharedWith: [], publicRole: 'edit', link: null, ...partial,
+} as DeckAccess);
 
 const fakeRequest = (remoteAddress: string | undefined, headers: Record<string, string | string[]>) =>
   ({ socket: { remoteAddress }, headers } as unknown as IncomingMessage);
@@ -95,7 +95,7 @@ describe('readDeckAccess', () => {
       sharedWith: ['Bob@Tailnet.Example', BOB, '', '  ', 42, null],
     }));
     expect(await readDeckAccess(dir, CONFIG)).toEqual({
-      owner: ALICE, visibility: 'private', sharedWith: [share(BOB)], publicRole: 'edit',
+      owner: ALICE, visibility: 'private', sharedWith: [share(BOB)], publicRole: 'edit', link: null,
     });
   });
 
@@ -116,6 +116,7 @@ describe('readDeckAccess', () => {
       visibility: 'public',
       publicRole: 'view',
       sharedWith: [share(BOB, 'view'), share('x', 'edit')],
+      link: null,
     });
   });
 
@@ -136,7 +137,7 @@ describe('readDeckAccess', () => {
 
   it('treats a missing sidecar as public and admin-owned', async () => {
     expect(await readDeckAccess(dir, { admin: 'Admin@Tailnet.Example' })).toEqual({
-      owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit',
+      owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit', link: null,
     });
   });
 
@@ -144,7 +145,7 @@ describe('readDeckAccess', () => {
     for (const raw of ['not json', '', '[]', 'null', '42', '"string"']) {
       await write(raw);
       expect(await readDeckAccess(dir, CONFIG)).toEqual({
-        owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit',
+        owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit', link: null,
       });
     }
   });
@@ -152,7 +153,7 @@ describe('readDeckAccess', () => {
   it('falls back field by field on wrong types', async () => {
     await write(JSON.stringify({ owner: 12, visibility: 'secret', sharedWith: 'bob', publicRole: 'boss' }));
     expect(await readDeckAccess(dir, CONFIG)).toEqual({
-      owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit',
+      owner: ADMIN, visibility: 'public', sharedWith: [], publicRole: 'edit', link: null,
     });
     await write(JSON.stringify({ owner: ALICE, visibility: 'PRIVATE' }));
     // Visibility is an exact enum: anything but "private" is public.
@@ -161,7 +162,7 @@ describe('readDeckAccess', () => {
 
   it('round-trips through writeDeckAccess', async () => {
     const access: DeckAccess = {
-      owner: ALICE, visibility: 'private', sharedWith: [share(BOB, 'view')], publicRole: 'edit',
+      owner: ALICE, visibility: 'private', sharedWith: [share(BOB, 'view')], publicRole: 'edit', link: null,
     };
     await writeDeckAccess(dir, access);
     expect(JSON.parse(await readFile(join(dir, 'access.json'), 'utf8'))).toEqual(access);

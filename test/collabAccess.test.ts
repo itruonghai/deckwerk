@@ -142,7 +142,7 @@ describe('collab server access control', () => {
     const created = await api('/api/decks?name=alice-new', { method: 'POST', headers: asUser(ALICE) });
     expect(created.status).toBe(200);
     const sidecar = JSON.parse(await readFile(join(rootDir, 'alice-new', 'access.json'), 'utf8'));
-    expect(sidecar).toEqual({ owner: ALICE, visibility: 'private', sharedWith: [], publicRole: 'edit' });
+    expect(sidecar).toEqual({ owner: ALICE, visibility: 'private', sharedWith: [], publicRole: 'edit', link: null });
     expect((await api('/api/deck?deck=alice-new', { headers: asUser(BOB) })).status).toBe(403);
     expect((await api('/api/deck?deck=alice-new', { headers: asUser(ALICE) })).status).toBe(200);
   });
@@ -272,7 +272,7 @@ describe('collab server access control', () => {
     expect(arrayBody.status).toBe(400);
     // Nothing above may have touched the sidecar.
     expect(await readDeckAccess(join(rootDir, 'alices-private'), { admin: ADMIN }))
-      .toEqual({ owner: ALICE, visibility: 'private', sharedWith: [], publicRole: 'edit' });
+      .toEqual({ owner: ALICE, visibility: 'private', sharedWith: [], publicRole: 'edit', link: null });
   });
 
   it('closes live sockets of people whose access is revoked, and keeps everyone else', async () => {
