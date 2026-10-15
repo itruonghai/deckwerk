@@ -54,7 +54,7 @@ describe('shared editor controls', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('offers the appearance as a radio group in the wordmark menu, System by default', () => {
+  it('offers the appearance as a radio group in the wordmark menu, Light by default', () => {
     localStorage.removeItem('deckwerk.uiTheme');
     const brand = createDeckWerkButton();
     document.body.appendChild(brand);
@@ -62,13 +62,19 @@ describe('shared editor controls', () => {
     const radios = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
       .map((item) => `${item.textContent}:${item.getAttribute('aria-checked')}`);
 
-    open();
-    expect(radios()).toEqual(['System:true', 'Light:false', 'Dark:false']);
-    [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
-      .find((item) => item.textContent === 'Light')!.click();
-    expect(document.documentElement.dataset.uiTheme).toBe('light');
+    const choose = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .find((item) => item.textContent === label)!.click();
+
     open();
     expect(radios()).toEqual(['System:false', 'Light:true', 'Dark:false']);
+    choose('Dark');
+    expect(document.documentElement.dataset.uiTheme).toBe('dark');
+    open();
+    expect(radios()).toEqual(['System:false', 'Light:false', 'Dark:true']);
+    // System is a choice of its own now, remembered rather than implied.
+    choose('System');
+    open();
+    expect(radios()).toEqual(['System:true', 'Light:false', 'Dark:false']);
     localStorage.removeItem('deckwerk.uiTheme');
   });
 

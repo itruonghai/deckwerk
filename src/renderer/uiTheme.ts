@@ -2,20 +2,22 @@
  * Light or dark editor chrome. The slides keep their deck's own theme either
  * way; this only recolours the app around them. The choice is per machine,
  * kept in localStorage, and set on <html> before first paint so the window
- * never flashes the other one. `system` (the default) follows the OS
- * appearance and keeps following it while the window is open.
+ * never flashes the other one. Light is the default; `system` follows the
+ * OS appearance and keeps following it while the window is open.
  */
 export type UiTheme = 'dark' | 'light';
 export type UiThemePreference = UiTheme | 'system';
 
 const KEY = 'deckwerk.uiTheme';
+/** What a machine that never chose gets. */
+const DEFAULT_PREFERENCE: UiThemePreference = 'light';
 
 export function storedUiThemePreference(): UiThemePreference {
   try {
     const value = localStorage.getItem(KEY);
-    return value === 'light' || value === 'dark' ? value : 'system';
+    return value === 'light' || value === 'dark' || value === 'system' ? value : DEFAULT_PREFERENCE;
   } catch {
-    return 'system';
+    return DEFAULT_PREFERENCE;
   }
 }
 
@@ -53,8 +55,8 @@ export function applyUiTheme(): UiTheme {
 
 export function setUiThemePreference(preference: UiThemePreference): UiTheme {
   try {
-    if (preference === 'system') localStorage.removeItem(KEY);
-    else localStorage.setItem(KEY, preference);
+    // Stored even for `system`: with Light as the default, no entry means Light.
+    localStorage.setItem(KEY, preference);
   } catch {
     // A locked-down profile still gets the theme for this window.
   }
