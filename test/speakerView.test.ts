@@ -85,6 +85,39 @@ describe('speaker view', () => {
     localStorage.removeItem('deckwerk.speakerNotesScale');
   });
 
+  it('lets the presenter drag the dividers, keeps the split, and resets it', () => {
+    localStorage.setItem('deckwerk.speakerSidebarWidth', '0.4');
+    localStorage.removeItem('deckwerk.speakerNotesHeight');
+    const view = open();
+    const layout = host.querySelector<HTMLElement>('.speaker-layout')!;
+    const sidebar = host.querySelector<HTMLElement>('.speaker-sidebar')!;
+    const columns = host.querySelector<HTMLElement>('.speaker-sidebar-splitter')!;
+    expect(layout.style.getPropertyValue('--speaker-sidebar-width')).toBe('40.00%');
+    expect(sidebar.classList.contains('notes-sized')).toBe(false);
+
+    // Arrows on a focused divider move it and do not change slides.
+    const keys = vi.fn();
+    const unbind = bindSpeakerKeys(window, keys);
+    columns.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(layout.style.getPropertyValue('--speaker-sidebar-width')).toBe('43.00%');
+    expect(keys).not.toHaveBeenCalled();
+    unbind();
+
+    localStorage.setItem('deckwerk.speakerNotesHeight', '0.5');
+    view.destroy();
+    open();
+    expect(host.querySelector<HTMLElement>('.speaker-layout')!.style.getPropertyValue('--speaker-sidebar-width')).toBe('43.00%');
+    const sized = host.querySelector<HTMLElement>('.speaker-sidebar')!;
+    expect(sized.classList.contains('notes-sized')).toBe(true);
+    expect(sized.style.getPropertyValue('--speaker-notes-height')).toBe('50.00%');
+
+    // Double-click puts the built-in layout back.
+    host.querySelector<HTMLElement>('.speaker-notes-splitter')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(sized.classList.contains('notes-sized')).toBe(false);
+    expect(localStorage.getItem('deckwerk.speakerNotesHeight')).toBeNull();
+    localStorage.removeItem('deckwerk.speakerSidebarWidth');
+  });
+
   it('previews the current and the following slide', () => {
     const view = open();
     view.setDeck(deckOf(['Intro', 'Method', 'Results']));

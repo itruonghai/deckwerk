@@ -65,6 +65,7 @@ const MARKUP = `
       <div class="panel-heading"><h2>Current slide</h2><div class="speaker-position">Slide 1</div></div>
       <div class="speaker-current preview"></div>
     </div>
+    <div class="speaker-splitter speaker-sidebar-splitter" role="separator" aria-orientation="vertical" aria-label="Resize the side column" title="Drag to resize · double-click to reset" tabindex="0"></div>
     <aside class="speaker-sidebar">
       <div class="preview-panel next-panel">
         <h2>Next slide</h2>
@@ -75,6 +76,7 @@ const MARKUP = `
         <div class="presenter-clock slide-clock"><span>Current slide</span><strong class="speaker-slide-timer">00:00</strong></div>
         <div class="presenter-clock wall-clock"><span>Local time</span><strong class="speaker-wall-clock">--:--</strong></div>
       </section>
+      <div class="speaker-splitter speaker-notes-splitter" role="separator" aria-orientation="horizontal" aria-label="Resize the notes" title="Drag to resize · double-click to reset" tabindex="0"></div>
       <section class="notes-panel" aria-label="Speaker notes">
         <div class="panel-heading">
           <h2>Notes</h2>
@@ -125,6 +127,39 @@ function storedNotesScale(): number {
   }
 }
 
+/**
+ * The presenter's own split of the screen: the side column's share of the
+ * width, and the notes' share of the side column's height. Dragged with the
+ * two dividers and kept per machine; null is the built-in layout.
+ */
+const SIDEBAR_WIDTH_KEY = 'deckwerk.speakerSidebarWidth';
+const NOTES_HEIGHT_KEY = 'deckwerk.speakerNotesHeight';
+const SIDEBAR_WIDTH_RANGE = [0.18, 0.65] as const;
+const NOTES_HEIGHT_RANGE = [0.12, 0.85] as const;
+const SPLIT_KEY_STEP = 0.03;
+
+function clampFraction(value: number, [min, max]: readonly [number, number]): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function storedFraction(key: string, range: readonly [number, number]): number | null {
+  try {
+    const value = Number(localStorage.getItem(key));
+    return value > 0 ? clampFraction(value, range) : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeFraction(key: string, value: number | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(value));
+  } catch {
+    // A locked-down profile still gets the layout for this show.
+  }
+}
+
 export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   const { host, resolveSrc, onCommand, now = () => Date.now() } = options;
   const openedAt = now();
@@ -153,6 +188,9 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   const slidesButton = pick<HTMLButtonElement>('.speaker-slides');
   const gridButton = pick<HTMLButtonElement>('.speaker-grid');
   const layout = pick('.speaker-layout');
+  const sidebar = pick('.speaker-sidebar');
+  const sidebarSplitter = pick('.speaker-sidebar-splitter');
+  const notesSplitter = pick('.speaker-notes-splitter');
   const footer = pick('footer');
   if (options.endLabel) end.textContent = options.endLabel;
   for (const action of options.extraActions ?? []) end.before(action);
@@ -184,6 +222,104 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   notesSmaller.addEventListener('click', () => stepNotesScale(-1));
   notesLarger.addEventListener('click', () => stepNotesScale(1));
   showNotesScale();
+
+  let sidebarWidth = storedFraction(SIDEBAR_WIDTH_KEY, SIDEBAR_WIDTH_RANGE);
+  let notesHeight = storedFraction(NOTES_HEIGHT_KEY, NOTES_HEIGHT_RANGE);
+  function showSplit(): void {
+    if (sidebarWidth === null) layout.style.removeProperty('--speaker-sidebar-width');
+    else layout.style.setProperty('--speaker-sidebar-width', `${(sidebarWidth * 100).toFixed(2)}%`);
+    if (notesHeight === null) sidebar.style.removeProperty('--speaker-notes-height');
+    else sidebar.style.setProperty('--speaker-notes-height', `${(notesHeight * 100).toFixed(2)}%`);
+    layout.classList.toggle('sidebar-sized', sidebarWidth !== null);
+    // A sized notes panel takes its height from the next preview, which then
+    // letterboxes in whatever room is left instead of holding 16:9 by width.
+    sidebar.classList.toggle('notes-sized', notesHeight !== null);
+    sidebarSplitter.setAttribute('aria-valuenow', String(Math.round((sidebarWidth ?? 0) * 100)));
+    notesSplitter.setAttribute('aria-valuenow', String(Math.round((notesHeight ?? 0) * 100)));
+  }
+  let rescaleFrame = 0;
+  function rescalePreviews(): void {
+    if (rescaleFrame) return;
+    rescaleFrame = requestAnimationFrame(() => {
+      rescaleFrame = 0;
+      if (!deck) return;
+      for (const target of [currentHost, nextHost]) {
+        const stage = target.querySelector<HTMLElement>('.stage');
+        if (!stage) continue;
+        const bounds = target.getBoundingClientRect();
+        applyStageScale(stage, deck, { w: bounds.width, h: bounds.height });
+      }
+    });
+  }
+  function setSidebarWidth(value: number | null): void {
+    sidebarWidth = value === null ? null : clampFraction(value, SIDEBAR_WIDTH_RANGE);
+    storeFraction(SIDEBAR_WIDTH_KEY, sidebarWidth);
+    showSplit();
+    rescalePreviews();
+  }
+  function setNotesHeight(value: number | null): void {
+    notesHeight = value === null ? null : clampFraction(value, NOTES_HEIGHT_RANGE);
+    storeFraction(NOTES_HEIGHT_KEY, notesHeight);
+    showSplit();
+    rescalePreviews();
+  }
+  function bindSplitter(
+    handle: HTMLElement,
+    /** The pointer's position along the drag, and how much it grows the panel per pixel. */
+    along: (event: PointerEvent) => number,
+    perPixel: () => number,
+    current: () => number,
+    set: (value: number | null) => void,
+    keys: { less: string; more: string },
+  ): void {
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      handle.setPointerCapture?.(event.pointerId);
+      host.classList.add('speaker-resizing');
+      // Relative to the grab, so the divider does not jump to the pointer.
+      const start = current();
+      const from = along(event);
+      const scale = perPixel();
+      const move = (moveEvent: PointerEvent) => set(start + (along(moveEvent) - from) * scale);
+      const stop = () => {
+        host.classList.remove('speaker-resizing');
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', stop);
+        handle.removeEventListener('pointercancel', stop);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', stop);
+      handle.addEventListener('pointercancel', stop);
+    });
+    handle.addEventListener('dblclick', () => set(null));
+    handle.addEventListener('keydown', (event) => {
+      const direction = event.key === keys.more ? 1 : event.key === keys.less ? -1 : 0;
+      if (event.key === 'Home') set(null);
+      else if (direction) set(current() + direction * SPLIT_KEY_STEP);
+      else return;
+      // Arrows here move the divider, not the slides.
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
+  bindSplitter(
+    sidebarSplitter,
+    (event) => event.clientX,
+    () => -1 / layout.getBoundingClientRect().width,
+    () => sidebarWidth ?? sidebar.getBoundingClientRect().width / layout.getBoundingClientRect().width,
+    setSidebarWidth,
+    { less: 'ArrowRight', more: 'ArrowLeft' },
+  );
+  bindSplitter(
+    notesSplitter,
+    (event) => event.clientY,
+    () => -1 / sidebar.getBoundingClientRect().height,
+    () => notesHeight ?? pick('.notes-panel').getBoundingClientRect().height / sidebar.getBoundingClientRect().height,
+    setNotesHeight,
+    { less: 'ArrowDown', more: 'ArrowUp' },
+  );
+  showSplit();
 
   let deck: Deck | null = null;
   let theme: HTMLStyleElement | null = null;
@@ -407,11 +543,12 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
     isGridOpen: () => overviewMode === 'grid',
     destroy() {
       clearInterval(clock);
+      cancelAnimationFrame(rescaleFrame);
       clearOverview();
       theme?.remove();
       theme = null;
       host.replaceChildren();
-      host.classList.remove('speaker-view', 'overview-open', 'overview-grid', 'notes-large');
+      host.classList.remove('speaker-view', 'overview-open', 'overview-grid', 'notes-large', 'speaker-resizing');
     },
   };
 }
