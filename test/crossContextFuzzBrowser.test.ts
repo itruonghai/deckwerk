@@ -12,6 +12,7 @@ import {
   type CrossSession,
   type CrossState,
 } from './support/crossContextSession.js';
+import { sidebarSelectionProbes } from './support/selectionSession.js';
 
 /**
  * Cross-context fuzz: a seeded random walk over a slide holding THREE
@@ -23,8 +24,15 @@ import {
  * mid-typing, Escape and empty-canvas clicks mid-edit, shift-click
  * multi-select, marquee drags, rail hops mid-edit, double-clicking the image,
  * Cmd+B mid-word, undo/redo at random points, Backspace with an element
- * selection, Cmd+A in both contexts, and Backspace on a multi-slide rail
- * selection (which must ask first; cancelled, or confirmed and undone).
+ * selection, Cmd+A in both contexts, Backspace on a multi-slide rail
+ * selection (which must ask first; cancelled, or confirmed and undone), and
+ * resizing a selected word from the sidebar's Font size field, flipping
+ * the selection from the sidebar, panning and zooming the view with a
+ * plain mouse and the keyboard (each time also showing or hiding the
+ * rulers), picking up the pen to put it down again or to draw a line
+ * that is undone, a freehand Pencil stroke (Shift+P) that is undone, and
+ * a line from the Shape menu whose points are opened with a double-click
+ * and bent with Cmd/Ctrl-drag, then undone.
  *
  * After EVERY step five oracles run: the whole-editor invariant set from
  * selectionSession, keystroke routing via per-step nonce strings, an element
@@ -149,7 +157,8 @@ type OpName =
   | 'type nonce' | 'bold mid-word' | 'escape' | 'click empty' | 'marquee'
   | 'rail hop' | 'undo' | 'redo' | 'undo round-trip' | 'delete selection'
   | 'cmd+a' | 'click with stray hover' | 'rail multi-delete' | 'stack key' | 'spelling fix'
-  | 'link mid-word';
+  | 'size from sidebar' | 'flip from sidebar' | 'viewport gesture' | 'pen abandoned' | 'pen line undone'
+  | 'pencil stroke undone' | 'line bent and undone' | 'link mid-word';
 
 interface Violation { seed: number; step: number; op: OpName; oracle: string; detail: string }
 
@@ -364,6 +373,34 @@ describe.skipIf(electronBinary)('cross-context fuzz (skipped)', () => {
   it('needs Electron', () => expect(electronBinary).toBe(''));
 });
 
+/** Pen ▾ → Pen, from whichever copy of the toolbar's control is showing. */
+async function openPen(): Promise<void> {
+  await session.cdp.evaluate(`[...document.querySelectorAll('.pen-tool-menu')]
+    .find((node) => node.getBoundingClientRect().width > 0)?.click()`);
+  await session.cdp.click('.pen-tool-popover [data-drawing-tool="pen"]', 'Pen ▾ → Pen');
+  await wait(60);
+}
+
+/** Shape → `label`, from whichever copy of the toolbar's menu is showing. */
+async function insertFromShapeMenu(label: string): Promise<void> {
+  await session.cdp.evaluate(`[...document.querySelectorAll('.shape-menu-trigger')]
+    .find((node) => node.getBoundingClientRect().width > 0 && node.textContent?.trim() === 'Shape')?.click()`);
+  await session.cdp.clickByText('.shape-menu-item', label, `Shape → ${label}`);
+  await wait(80);
+}
+
+const pencilIsOut = () => session.cdp.evaluate<boolean>(
+  `document.querySelector('.canvas-host')?.classList.contains('pencil-tool') ?? false`);
+
+/**
+ * Slides in the deck. The walks share one history, so a redo can bring back
+ * a confirmed whole-deck deletion (see 'rail multi-delete') and leave one.
+ */
+const slideCount = () => session.cdp.evaluate<number>('window.store.get().deck.slides.length');
+
+const penIsDown = () => session.cdp.evaluate<boolean>(
+  `document.querySelector('.canvas-host')?.classList.contains('pen-tool') ?? false`);
+
 /** The elements an op can aim at on the current slide, live. */
 function targetsOn(pre: CrossState): string[] {
   const known = [PARA, LIST, IMAGE, FAR];
@@ -392,6 +429,7 @@ function chooseOp(next: () => number, pre: CrossState): OpName {
     add('click', 2); // click the other box mid-typing, no Escape first
     add('spelling fix', 1);
     add('link mid-word', 1);
+    add('size from sidebar', 2);
   }
   add('escape', 1);
   add('click empty', 1);
@@ -401,9 +439,17 @@ function chooseOp(next: () => number, pre: CrossState): OpName {
   add('redo', 1);
   add('undo round-trip', 1);
   if (pre.editing === null && pre.selection.length > 0) add('delete selection', 2);
+  if (pre.editing === null && pre.selection.length > 0) add('flip from sidebar', 1);
   add('cmd+a', 1);
   add('rail multi-delete', 1);
   add('stack key', 1);
+  add('viewport gesture', 2);
+  if (pre.editing === null) {
+    add('pen abandoned', 1);
+    add('pen line undone', 1);
+    add('pencil stroke undone', 1);
+    add('line bent and undone', 1);
+  }
   return pick(next, ops);
 }
 
@@ -472,6 +518,72 @@ async function performOp(
       await checkRouting(pre, tail, flag);
       return 'same';
     }
+    case 'size from sidebar': {
+      // Select a word, resize it from the sidebar's Font size field, and click
+      // back into the text. While the field has focus the edit, the selection
+      // and its paint survive (the browser's own selection moved into the
+      // field, so the editor shows it); back in the text the paint is gone.
+      const editing = pre.editing!;
+      const probes = sidebarSelectionProbes(session.cdp);
+      const length = (await session.textOf(editing)).length;
+      if (length > 0) await probes.selectWord(editing, Math.min(6, length - 1));
+      const selected = await probes.selectedText();
+      await probes.setField('Font size', pick(next, ['36', '44']));
+      const after = await session.state();
+      if (after.editing !== editing) {
+        flag('routing', `sizing from the sidebar ended the edit of ${editing}`
+          + ` (now ${after.editing ?? 'nothing'})`);
+        return 'same';
+      }
+      if (selected) {
+        const still = await probes.selectedText();
+        if (still !== selected) {
+          flag('routing', `sizing from the sidebar changed the selection from`
+            + ` ${JSON.stringify(selected)} to ${JSON.stringify(still)}`);
+        }
+        const painted = await probes.paintedSelection();
+        if (painted.join('') !== selected) {
+          flag('routing', `the selection ${JSON.stringify(selected)} shows as`
+            + ` ${JSON.stringify(painted)} while the Font size field has focus`);
+        }
+      }
+      if (length > 0) {
+        await session.cdp.clickTextAtOffset(`${elementSelector(editing)} .text-content`, 0,
+          `the start of ${editing}`);
+        await wait(80);
+      } else {
+        await session.click(editing);
+      }
+      const back = await session.state();
+      if (back.editing !== editing || back.focus !== `inside ${editing}`) {
+        flag('routing', `clicking back into ${editing} from the sidebar left editing`
+          + ` ${back.editing ?? 'nothing'} with focus ${back.focus}`);
+      }
+      const kept = await probes.keptHighlight();
+      if (kept.length > 0) {
+        flag('routing', `the kept selection ${JSON.stringify(kept)} survived the click back`
+          + ` into ${editing}`);
+      }
+      return 'same';
+    }
+    case 'flip from sidebar': {
+      // Props → Geometry → Flip, with a real click: every selected object
+      // mirrors where it stands (its box never moves) and nothing else does.
+      const axis = pick(next, ['horizontal', 'vertical'] as const);
+      const read = (fields: string) => session.cdp.evaluate<string>(
+        `JSON.stringify(window.store.selectedElements().map((e) => [e.id, ${fields}]))`,
+      );
+      const boxes = await read('e.x, e.y, e.w, e.h');
+      const flips = await read('Boolean(e.flipX), Boolean(e.flipY)');
+      await session.cdp.click(`.geometry-section button[data-flip="${axis}"]`, `Flip ${axis}`);
+      await wait(80);
+      const after = await read('e.x, e.y, e.w, e.h');
+      if (after !== boxes) flag('routing', `flipping ${axis} moved the selection: ${boxes} -> ${after}`);
+      if (await read('Boolean(e.flipX), Boolean(e.flipY)') === flips) {
+        flag('routing', `flipping ${axis} left ${pre.selection.join(', ')} unflipped`);
+      }
+      return 'same';
+    }
     case 'escape':
       await session.key('Escape', 27);
       return 'same';
@@ -494,6 +606,7 @@ async function performOp(
       return 'same';
     }
     case 'rail hop': {
+      if (await slideCount() < 2) return 'same';
       const other = pre.slideIndex === 0 ? 1 : 0;
       await session.clickRail(other);
       if (next() < 0.6) await session.clickRail(pre.slideIndex);
@@ -573,6 +686,120 @@ async function performOp(
     case 'cmd+a':
       await session.chord('a', 'KeyA', 65, MOD, pre.editing !== null ? ['selectAll'] : undefined);
       return 'same';
+    case 'pen abandoned': {
+      // Pen ▾ → Pen, one point, Escape: nothing is drawn, and the
+      // pen is put down.
+      await openPen();
+      await session.cdp.clickWithin('.slide-layer', 0.45, 0.96, 'a pen point');
+      await session.key('Escape', 27);
+      if (await penIsDown()) flag('routing', 'Escape left the pen drawing');
+      return 'same';
+    }
+    case 'pen line undone': {
+      // Two points and Return draw a line; undo takes it away whole.
+      const before = await session.deckSnapshot();
+      const idsBefore = await session.allElementIds();
+      await openPen();
+      await session.cdp.clickWithin('.slide-layer', 0.45, 0.96, 'a pen point');
+      await session.cdp.clickWithin('.slide-layer', 0.6, 0.96, 'a second pen point');
+      await session.key('Enter', 13);
+      await wait(120);
+      if (await penIsDown()) flag('routing', 'Return left the pen drawing');
+      const drawn = await session.allElementIds();
+      if (drawn.length !== idsBefore.length + 1) {
+        flag('census', `the pen drew ${drawn.length - idsBefore.length} objects, not one`);
+      }
+      for (const id of drawn) producedIds.add(id);
+      await session.chord('z', 'KeyZ', 90, MOD);
+      await wait(250);
+      if (await session.deckSnapshot() !== before) flag('undoRoundTrip', 'undo did not take back the drawn line');
+      return 'same';
+    }
+    case 'pencil stroke undone': {
+      // Shift+P, one freehand stroke: one smooth path, the pencil still out
+      // for the next; Escape puts it down, and one undo takes the stroke back.
+      const before = await session.deckSnapshot();
+      const idsBefore = await session.allElementIds();
+      await session.chord('P', 'KeyP', 80, SHIFT);
+      await wait(60);
+      if (!await pencilIsOut()) {
+        flag('routing', 'Shift+P did not take up the pencil');
+        return 'same';
+      }
+      const layer = await session.boxOf('.slide-layer');
+      const at = (fx: number, fy: number) => ({ x: layer.left + layer.width * fx, y: layer.top + layer.height * fy });
+      await session.dragPath([at(0.3, 0.9), at(0.38, 0.84), at(0.46, 0.93), at(0.54, 0.85), at(0.62, 0.92)]);
+      await wait(120);
+      const drawn = await session.allElementIds();
+      if (drawn.length !== idsBefore.length + 1) {
+        flag('census', `one pencil stroke drew ${drawn.length - idsBefore.length} objects, not one`);
+      }
+      for (const id of drawn) producedIds.add(id);
+      if (!await pencilIsOut()) flag('routing', 'the pencil went down after one stroke');
+      await session.key('Escape', 27);
+      if (await pencilIsOut()) flag('routing', 'Escape left the pencil out');
+      await session.chord('z', 'KeyZ', 90, MOD);
+      await wait(250);
+      if (await session.deckSnapshot() !== before) flag('undoRoundTrip', 'undo did not take back the pencil stroke');
+      return 'same';
+    }
+    case 'line bent and undone': {
+      // Shape → Line, a double-click opens its two points, Cmd/Ctrl-drag on
+      // its middle bends it into a curve that is still a line; Escape, then
+      // two undos take back the bend and the line.
+      const before = await session.deckSnapshot();
+      const idsBefore = await session.allElementIds();
+      await insertFromShapeMenu('Line');
+      const added = (await session.allElementIds()).filter((id) => !idsBefore.includes(id));
+      if (added.length !== 1) {
+        flag('census', `Shape → Line added ${added.length} objects, not one`);
+        return 'resync';
+      }
+      producedIds.add(added[0]);
+      // Census ids are "slide:element".
+      const id = added[0].slice(added[0].indexOf(':') + 1);
+      const box = await session.boxOf(elementSelector(id));
+      const middle = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      await session.cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...middle, button: 'none', buttons: 0 });
+      for (const clickCount of [1, 2]) {
+        await session.cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...middle, button: 'left', buttons: 1, clickCount });
+        await session.cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...middle, button: 'left', buttons: 0, clickCount });
+      }
+      await wait(120);
+      const editing = await session.cdp.evaluate<number>(`document.querySelectorAll('.path-anchor').length`);
+      if (editing !== 2) {
+        flag('routing', `double-clicking a line showed ${editing} points, not its two ends`);
+        await session.key('Escape', 27);
+        return 'resync';
+      }
+      const modifiers = MOD;
+      await session.cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', ...middle, button: 'left', buttons: 1, clickCount: 1, modifiers });
+      for (const dy of [-20, -50, -80]) {
+        await session.cdp.call('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', x: middle.x, y: middle.y + dy, button: 'left', buttons: 1, modifiers,
+        });
+        await wait(30);
+      }
+      await session.cdp.call('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: middle.x, y: middle.y - 80, button: 'left', buttons: 0, clickCount: 1, modifiers,
+      });
+      await wait(120);
+      const bent = await session.cdp.evaluate<{ shape: string; control: unknown } | null>(
+        `(() => { const el = window.store.slide?.elements.find((e) => e.id === ${JSON.stringify(id)}); return el ? { shape: el.shape, control: el.control ?? null } : null; })()`);
+      if (!bent || bent.shape !== 'line' || !bent.control) {
+        flag('census', `bending a line left ${JSON.stringify(bent)}, not a curved line`);
+      }
+      await session.key('Escape', 27);
+      await session.chord('z', 'KeyZ', 90, MOD);
+      await wait(200);
+      await session.chord('z', 'KeyZ', 90, MOD);
+      await wait(250);
+      if (await session.deckSnapshot() !== before) flag('undoRoundTrip', 'two undos did not take back the bent line');
+      return 'same';
+    }
+    case 'viewport gesture':
+      await viewportGesture(next, pre, flag);
+      return 'same';
     case 'rail multi-delete': {
       // Select both slides in the rail with real clicks, then a deletion key.
       // More than one slide must never go without a confirmation: Escape
@@ -582,6 +809,7 @@ async function performOp(
         `JSON.stringify(window.store.get().deck.slides.map((slide) => [slide.id, slide.elements.map((el) => el.id)]))`);
       const dialogOpen = () => session.cdp.evaluate<boolean>(
         `Boolean(document.querySelector('.workflow-dialog[role="alertdialog"]'))`);
+      if (await slideCount() < 2) return 'same';
       await session.clickRail(pre.slideIndex);
       await session.cdp.clickModified(`.rail-item[data-index="${pre.slideIndex === 0 ? 1 : 0}"]`,
         SHIFT, 'shift-click the other rail slide');
@@ -713,6 +941,113 @@ async function checkRouting(
     flag('routing', `typed "${nonce}" into ${editing} but it also appears in `
       + `[${strays.join(', ')}]`);
   }
+}
+
+/**
+ * Pan or zoom the view the way a plain mouse and the keyboard do it — a
+ * Ctrl/Cmd wheel notch, Shift and the wheel, a middle-button drag, Space and
+ * a drag, Ctrl/Cmd + or - — over a random object or the empty slide, mid-edit
+ * or not. None of it is an edit: every object stays where it was, and the
+ * selection, the text edit and the slide are as they were. Nor may the page
+ * itself zoom. Ctrl/Cmd+0 then fits the view again, so later ops aim at an
+ * unpanned slide.
+ */
+async function viewportGesture(
+  next: () => number,
+  pre: CrossState,
+  flag: (oracle: 'routing' | 'census', detail: string) => void,
+): Promise<void> {
+  const { cdp } = session;
+  const snapshot = () => cdp.evaluate<string>(`(() => {
+    const state = window.store.get();
+    return JSON.stringify({
+      geometry: state.deck.slides.map((slide) => slide.elements.map((element) =>
+        [element.id, element.x, element.y, element.w, element.h, element.rot])),
+      slide: state.slideIndex,
+      selection: [...state.selection].sort(),
+      editing: window.canvas.editingElementId(),
+    });
+  })()`);
+  const before = await snapshot();
+  const ratio = await cdp.evaluate<number>('window.devicePixelRatio');
+  const targets = targetsOn(pre);
+  const aim = targets.length > 0 && next() < 0.7
+    ? await session.boxOf(elementSelector(pick(next, targets)))
+    : await session.boxOf('.slide-layer');
+  const x = aim.left + aim.width * (0.2 + 0.6 * next());
+  const y = aim.top + aim.height * (0.2 + 0.6 * next());
+  const mouse = (type: string, at: { x: number; y: number }, button: string, buttons: number) =>
+    cdp.call('Input.dispatchMouseEvent', {
+      type, x: at.x, y: at.y, button, buttons, clickCount: type === 'mouseMoved' ? 0 : 1,
+    });
+  const drag = async (button: 'left' | 'middle', buttons: number) => {
+    const dx = (next() - 0.5) * 300;
+    const dy = (next() - 0.5) * 200;
+    await mouse('mouseMoved', { x, y }, 'none', 0);
+    await mouse('mousePressed', { x, y }, button, buttons);
+    for (let i = 1; i <= 4; i++) {
+      await mouse('mouseMoved', { x: x + (dx * i) / 4, y: y + (dy * i) / 4 }, button, buttons);
+      await wait(16);
+    }
+    await mouse('mouseReleased', { x: x + dx, y: y + dy }, button, 0);
+  };
+  // Space pans only from the canvas or from nothing in particular; with the
+  // rail or a field focused, it is theirs, and a Space drag would be a plain
+  // drag. Mid-edit, Space is a typed space.
+  const spaceIsFree = pre.editing === null && await cdp.evaluate<boolean>(`(() => {
+    const focus = document.activeElement;
+    return !focus || focus === document.body || Boolean(focus.closest('#canvas'));
+  })()`);
+  const gestures = ['notch', 'shift wheel', 'middle drag', 'zoom keys', ...(spaceIsFree ? ['space drag'] : [])];
+  const gesture = pick(next, gestures);
+  switch (gesture) {
+    case 'notch':
+      await cdp.call('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x, y, deltaX: 0, deltaY: next() < 0.5 ? -120 : 100, modifiers: MOD,
+      });
+      break;
+    case 'shift wheel':
+      await cdp.call('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x, y, deltaX: 0, deltaY: (next() - 0.5) * 240, modifiers: SHIFT,
+      });
+      break;
+    case 'middle drag':
+      await drag('middle', 4);
+      break;
+    case 'zoom keys':
+      if (next() < 0.5) await session.chord('=', 'Equal', 187, MOD);
+      else await session.chord('-', 'Minus', 189, MOD);
+      break;
+    case 'space drag': {
+      const space = { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 };
+      await cdp.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...space });
+      await cdp.call('Input.dispatchKeyEvent', { type: 'char', text: ' ', unmodifiedText: ' ', ...space });
+      await drag('left', 1);
+      await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', ...space });
+      break;
+    }
+  }
+  // Every gesture also flips the rulers from the zoom pill, mid-edit or
+  // not: that moves the slide over by their width, so the steps after it aim
+  // at a slide placed somewhere else. It draws nothing from the walk's
+  // random stream, so each seed keeps the path it had before the rulers.
+  const rulersShown = () => cdp.evaluate<boolean>(
+    `!document.querySelector('#canvas .canvas-ruler-top').hasAttribute('hidden')`);
+  const rulersWere = await rulersShown();
+  await cdp.click('#canvas .zoom-controls .rulers-toggle', 'the rulers toggle');
+  if (await rulersShown() === rulersWere) flag('routing', 'the rulers toggle did not show or hide the rulers');
+  await wait(120);
+  const after = await snapshot();
+  if (after !== before) {
+    flag('census', `${gesture} and the rulers toggle changed the deck or the editing state; diff: ${firstDiff(before, after)}`);
+  }
+  await session.chord('0', 'Digit0', 48, MOD);
+  const view = await cdp.evaluate<{ zoom: string; ratio: number }>(`({
+    zoom: document.querySelector('#canvas .zoom-value').value,
+    ratio: window.devicePixelRatio,
+  })`);
+  if (view.ratio !== ratio) flag('routing', `${gesture} zoomed the page itself: ${ratio} -> ${view.ratio}`);
+  if (view.zoom !== '100%') flag('routing', `Ctrl/Cmd+0 after ${gesture} left the canvas at ${view.zoom}`);
 }
 
 function firstDiff(a: string, b: string): string {

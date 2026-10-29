@@ -12,7 +12,7 @@ const ElementEditSchema = z.object({
   target: z.literal('element'),
   slideId: z.string().min(1),
   elementId: z.string().min(1),
-  expectedType: z.enum(['text', 'image', 'video', 'shape', 'html', 'web', 'unsupported']).optional(),
+  expectedType: z.enum(['text', 'image', 'video', 'shape', 'html', 'web', 'code', 'unsupported']).optional(),
   set: SetValuesSchema,
   unset: UnsetPathsSchema,
 });
@@ -70,6 +70,16 @@ const COMMON_ELEMENT_PROPERTIES: PropertyDoc[] = [
   { path: 'w', type: 'positive number', description: 'Element box width in canvas pixels.', example: 1640 },
   { path: 'h', type: 'positive number', description: 'Element box height in canvas pixels.', example: 120 },
   { path: 'rot', type: 'number', description: 'Clockwise rotation in degrees.', example: 0 },
+  {
+    path: 'flipX', type: 'boolean',
+    description: 'Mirrored left to right in the element\'s own frame, before rot; the box does not move. Ignored on lines, arrows and braces, which are mirrored by moving their endpoints.',
+    example: true, unset: 'Unset to show it unflipped.',
+  },
+  {
+    path: 'flipY', type: 'boolean',
+    description: 'Mirrored top to bottom in the element\'s own frame, before rot; the box does not move. Ignored on lines, arrows and braces.',
+    example: true, unset: 'Unset to show it unflipped.',
+  },
   { path: 'z', type: 'integer', description: 'Paint order; larger values are in front.', example: 10 },
   { path: 'opacity', type: 'number 0..1', description: 'Element opacity.', example: 1 },
   { path: 'class', type: 'string[]', description: 'Theme classes such as role-title or role-body.', example: ['role-title'] },
@@ -132,13 +142,17 @@ const ELEMENT_PROPERTIES: Record<SlideElement['type'], PropertyDoc[]> = {
     { path: 'stroke', type: 'CSS color|null', description: 'Outline color.', example: '#ffffff' },
     { path: 'strokeWidth', type: 'number >= 0', description: 'Outline width in pixels.', example: 2 },
     { path: 'radius', type: 'number >= 0', description: 'Rectangle corner radius.', example: 24 },
-    { path: 'arrowStart', type: 'boolean', description: 'Arrowhead at the start of a line.', example: false },
-    { path: 'arrowEnd', type: 'boolean', description: 'Arrowhead at the end of a line.', example: true },
+    { path: 'arrowStart', type: 'boolean', description: 'Arrowhead at the start of a line or an open path.', example: false },
+    { path: 'arrowEnd', type: 'boolean', description: 'Arrowhead at the end of a line or an open path.', example: true },
+    { path: 'startCap', type: 'enum', values: ['dot', 'bar'], description: 'A dot or a bar on the start of a line or open path, when it has no arrowhead there (arrowStart wins). Unset is a plain end.', example: 'dot' },
+    { path: 'endCap', type: 'enum', values: ['dot', 'bar'], description: 'A dot or a bar on the end of a line or open path, when it has no arrowhead there (arrowEnd wins). Unset is a plain end.', example: 'bar' },
+    { path: 'strokeDash', type: 'enum', values: ['dashed', 'dotted'], description: 'A broken stroke: dashes three widths long with gaps of two, or round dots two widths apart. Unset is solid.', example: 'dashed' },
     { path: 'arrowSize', type: 'number > 0', description: 'Arrowhead length in pixels; unset means six stroke widths, and it is never drawn shorter than the line is wide.', example: 24 },
     { path: 'control', type: '{x,y}|null', description: 'Canvas-space quadratic curve control point.', example: { x: 600, y: 300 } },
     { path: 'braceDepth', type: 'number', description: 'For braces: signed distance from the chord to the point, along the element\'s own +y; half of it is the curl radius.', example: 40 },
-    { path: 'path', type: 'SVG path|null', description: 'SVG path data for path shapes.', example: 'M0 0 L100 100' },
-    { path: 'pathSize', type: '{w,h}|null', description: 'Coordinate space of SVG path data.', example: { w: 100, h: 100 } },
+    { path: 'path', type: 'SVG path|null', description: 'SVG path data for path shapes: closed with Z and filled for a shape, open with fill null for a line.', example: 'M0 100 C 0 0 100 0 100 100 Z' },
+    { path: 'strokeStyle', type: 'enum', values: ['pen', 'brush', 'pencil', 'marker'], description: 'How a line\'s or a path\'s stroke is drawn: pen (default) an even line, brush tapering at its ends, pencil grainy and thin, marker a flat see-through highlighter.', example: 'brush' },
+    { path: 'pathSize', type: '{w,h}|null', description: 'Coordinate space of SVG path data, scaled to the box. Equal to the box (w,h) for a drawn path, so strokeWidth is in pixels and a resize redraws the path.', example: { w: 100, h: 100 } },
   ],
   html: [
     { path: 'html', type: 'string', description: 'Markup held by this isolated fallback object.', example: '<div>Fallback</div>' },
@@ -148,6 +162,13 @@ const ELEMENT_PROPERTIES: Record<SlideElement['type'], PropertyDoc[]> = {
     { path: 'poster', type: 'deck-relative asset path|null', description: 'Still shown where the page cannot run (PDF, thumbnails).', example: 'assets/web/chart.poster.png' },
     { path: 'interactive', type: 'boolean', description: 'Whether the page receives clicks while presenting. Off, clicks advance the deck.', example: true },
     { path: 'title', type: 'string', description: 'Accessible name of the embedded page.', example: 'Papers per year' },
+  ],
+  code: [
+    { path: 'code', type: 'string', description: 'The source code, verbatim: whitespace, tabs and blank lines are kept.', example: 'def f(x):\n    return x * 2' },
+    { path: 'language', type: 'string', description: 'Grammar id: python, javascript, typescript, c, cpp, cuda, rust, glsl, bash, json, yaml, latex, html, css, sql, go, java, julia, matlab or plaintext.', example: 'python' },
+    { path: 'scheme', type: 'enum', values: ['github-light', 'github-dark', 'one-dark-pro', 'solarized-light', 'dracula', 'nord', 'deck'], description: 'Colour scheme; deck follows the deck theme colours.', example: 'github-dark' },
+    { path: 'fontSize', type: 'positive number', description: 'Type size in pixels; line height and padding scale with it.', example: 28 },
+    { path: 'lineNumbers', type: 'boolean', description: 'Show a gutter of line numbers.', example: true },
   ],
   unsupported: [],
 };
@@ -333,7 +354,7 @@ function allowedSlidePath(path: string): boolean {
 }
 
 function allowedElementPath(type: SlideElement['type'], path: string): boolean {
-  const common = new Set(['x', 'y', 'w', 'h', 'rot', 'z', 'opacity', 'class', 'morphId']);
+  const common = new Set(['x', 'y', 'w', 'h', 'rot', 'flipX', 'flipY', 'z', 'opacity', 'class', 'morphId']);
   if (common.has(path) || path.startsWith('style.')) return true;
   if (type === 'text' && path.startsWith('contentStyle.')) return true;
   const typePaths = new Set(ELEMENT_PROPERTIES[type].map((property) => property.path.replace(/\.<[^>]+>$/, '')));

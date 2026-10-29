@@ -32,11 +32,14 @@ export const IPC = {
   clipboardWrite: 'clipboard:write',
   clipboardRead: 'clipboard:read',
   assetProbe: 'asset:probe',
+  assetSaveOriginal: 'asset:saveOriginal',
   presentOpen: 'present:open',
   displayList: 'display:list',
   presentCursor: 'present:cursor',
   presentCommand: 'present:command',
   presentState: 'present:state',
+  /** The show ended; carries the slide index it was on, for the editor to land on. */
+  presentEnded: 'present:ended',
   trimOpen: 'trim:open',
   trimRun: 'trim:run',
   /** A poster frame for a preview surface, cut by ffmpeg in the main process. */
@@ -125,7 +128,9 @@ export type { AgentContextDraft, AgentRequest, AgentResponse };
 
 export type PresentationCommand =
   | { type: 'next' | 'prev' | 'toggleBlank' | 'swapDisplays' | 'exit' }
-  | { type: 'goTo'; slide: number };
+  | { type: 'goTo'; slide: number }
+  /** The presenter's video speed for the current slide (`>` / `<` / `=`). */
+  | { type: 'videoRate'; change: 'faster' | 'slower' | 'normal' };
 
 export interface PresentationState {
   cursor: { slide: number; step: number };
@@ -263,6 +268,8 @@ export interface VideoPosterRequest {
   src: string;
   /** Seconds into the clip. */
   time: number;
+  /** A full-resolution still for a printed page instead of a thumbnail. */
+  print?: boolean;
 }
 
 export interface VideoPosterResult {

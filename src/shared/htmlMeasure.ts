@@ -1,5 +1,8 @@
 import { renameRetiredDataAttributes } from './fieldAliases.js';
-import { authoringCss, KATEX_PAGE_HTML, type MeasuredNode, type MeasuredSlide } from './htmlSlides.js';
+import {
+  AUTHORING_LISTS_ATTRIBUTE, authoringCss, authoringListStyle, KATEX_PAGE_HTML,
+  type MeasuredNode, type MeasuredSlide,
+} from './htmlSlides.js';
 
 /**
  * The browser half of HTML authoring: assemble a page, walk it, measure it.
@@ -76,6 +79,7 @@ export function authoringPageHtml(input: AuthoringPage): string {
 <base href="${page.base}">
 <style>${authoringCss(page.canvas)}</style>
 <style>${page.typeCss}</style>
+${authoringListStyle(page.typeCss)}
 <style>${page.theme}</style>
 ${KATEX_PAGE_HTML}
 </head>
@@ -111,9 +115,15 @@ function withKatex(html: string): string {
  */
 function withStructuralCss(html: string, page: AuthoringPage): string {
   // The selector below only ever appears inside the authoring CSS itself.
-  if (html.includes('section.slide, [data-slide-id]')) return html;
-  const style = `<style>${authoringCss(page.canvas)}</style>\n<style>${page.typeCss}</style>`;
-  if (/<head[\s>]/i.test(html)) {
+  const structural = html.includes('section.slide, [data-slide-id]')
+    ? '' : `<style>${authoringCss(page.canvas)}</style>\n<style>${page.typeCss}</style>\n`;
+  // The list rules are their own block, because a file exported before they
+  // existed carries the rest and not them. Layered, so where they go in the
+  // head does not change what they lose to.
+  const lists = new RegExp(`<style\\b[^>]*\\b${AUTHORING_LISTS_ATTRIBUTE}\\b`, 'i').test(html)
+    ? '' : authoringListStyle(page.typeCss);
+  const style = `${structural}${lists}`;
+  if (style && /<head[\s>]/i.test(html)) {
     return html.replace(/<head\b[^>]*>/i, (open) => `${open}\n${style}`);
   }
   return html;
@@ -195,6 +205,39 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     try { return [...sheet.cssRules].map((rule) => rule.cssText); } catch { return []; }
   }).join('\n');
   const independent = doc.documentElement.dataset.slideEditorIndependent === 'true';
+  /**
+   * Whether a node is markup the author wrote on this page, rather than (part
+   * of) an object the deck already holds.
+   *
+   * `independent` is a fact about the *page*: who owns its CSS. An exported
+   * page is theme-driven, so its computed styles are never baked, its classes
+   * stay, its lists and pseudo-elements are the player's. Those rules stay
+   * per page. But what a node *becomes* — an SVG primitive a shape, a clipped
+   * region a fallback — is a fact about the node: an
+   * exported object carries `data-element-id` on itself or its wrapper and
+   * must come back exactly as it went out, while a fresh `<svg>` an agent
+   * wrote beside it in the same section is the same markup it would be in a
+   * `new` page, and gets the same conversions. Deciding that per page left
+   * every arrow written into an export an inert HTML region.
+   */
+  const authoredHere = (node: Element): boolean =>
+    independent || node.closest('[data-element-id]') === null;
+  /**
+   * Nodes a walk itself turned into HTML fallbacks, as against ones the page
+   * declared so. The walk marks such a node `data-element="html"` in the
+   * document, so a second walk of the same document would read its own marker
+   * as the author's and stop reporting it. The set is kept on the document
+   * object, not in its markup, so nothing extra reaches the stored HTML; this
+   * function also runs serialised inside the compile page, so it cannot live
+   * at module scope.
+   */
+  const walkKey = Symbol.for('deckwerk.walkFallbacks');
+  const docSlots = doc as unknown as Record<symbol, WeakSet<HTMLElement> | undefined>;
+  const walkFallbacks = docSlots[walkKey] ?? (docSlots[walkKey] = new WeakSet<HTMLElement>());
+  /** Why an inline SVG did not become a shape, for the fallback's reason and the apply's warning. */
+  const svgRefusals = new Map<HTMLElement, string>();
+  /** What a conversion approximated or could not carry, reported with the slide being measured. */
+  let conversionWarnings: string[] = [];
   // jsdom accepts the pseudo-element overload but emits a noisy
   // "not implemented" diagnostic for every call. Real imports are measured
   // in Chromium, where the overload is available; unit tests simply skip this
@@ -243,6 +286,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     '-webkit-background-clip': ['border-box'],
     'background-clip': ['border-box'],
     '-webkit-text-fill-color': ['currentcolor'],
+    'list-style-position': ['outside'],
   };
   const ignorableComputed = (property: string, value: string): boolean => {
     if (!value) return true;
@@ -276,6 +320,51 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       url.startsWith(base) ? `url(${quote}${url.slice(base.length)}${quote})` : whole);
   };
 
+  /**
+   * What the lists of an independent page compute *without* the authoring
+   * list rules (`authoringListCss`), read once with those rules switched off.
+   *
+   * The rules stand in for the player's own list styling, which the player
+   * applies again by itself. Baked into the items, they would come back as
+   * the author's: an item's `list-style-type: none` is exactly what the
+   * player reads as a request for the browser's native markers. So a value
+   * those rules decided — it differs with them off — is not baked; one the
+   * author's CSS decided reads the same either way, and is.
+   */
+  const layerless = new Map<Element, Map<string, string>>();
+  const markerless = new Set<Element>();
+  const listSheet = independent
+    ? doc.querySelector<HTMLStyleElement>('style[data-authoring-lists]')?.sheet ?? null : null;
+  if (listSheet) {
+    listSheet.disabled = true;
+    for (const list of doc.querySelectorAll('ul, ol, li')) {
+      const style = computed(list);
+      layerless.set(list, new Map([...COMPUTED_TEXT_STYLE, ...COMPUTED_BOX_STYLE]
+        .map((property) => [property, style.getPropertyValue(property).trim()])));
+      if (list.tagName === 'LI' && supportsPseudoComputedStyle
+        && /^(?:none|normal)?$/.test(view.getComputedStyle(list, '::before').content)) markerless.add(list);
+    }
+    listSheet.disabled = false;
+  }
+
+  /**
+   * The marker style a browser gives a list on its own: not something the
+   * author asked for. Baked, it is — the player keeps native markers for an
+   * item that carries a `list-style-type`, so a nested `<ul>` that merely
+   * computed the browser's `circle` lost the deck's own markers.
+   */
+  const browserListStyle = (node: Element): string | null => {
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'ol') return 'decimal';
+    if (tag === 'ul') {
+      let depth = 0;
+      for (let up = node.parentElement?.closest('ul, ol'); up; up = up.parentElement?.closest('ul, ol')) depth += 1;
+      return depth === 0 ? 'disc' : depth === 1 ? 'circle' : 'square';
+    }
+    // Outside any list it is the property's initial value.
+    return node.closest('ul, ol') ? null : 'disc';
+  };
+
   const computedPresentation = (node: HTMLElement, includeText: boolean): Record<string, string> => {
     if (!independent) return {};
     const style = computed(node);
@@ -286,8 +375,11 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     // The stroke colour only means anything with a width behind it, and the
     // fill colour only when it differs from the text colour it shadows.
     const strokeless = parseFloat(style.getPropertyValue('-webkit-text-stroke-width')) === 0;
+    const withoutListRules = layerless.get(node);
     for (const property of properties) {
       const value = style.getPropertyValue(property).trim();
+      if (withoutListRules && withoutListRules.get(property) !== value) continue;
+      if (property === 'list-style-type' && value === browserListStyle(node)) continue;
       if (strokeless && property.startsWith('-webkit-text-stroke')) continue;
       if (property === '-webkit-text-fill-color'
         && value === style.getPropertyValue('color').trim()) continue;
@@ -414,6 +506,92 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     return clone.innerHTML;
   };
 
+  /**
+   * Whitespace as the browser lays it out, written into the markup, because
+   * the deck draws its text `pre-wrap` and would draw every space it is given.
+   *
+   * Only what HTML collapses is collapsed: runs of spaces, tabs and newlines.
+   * An em space or a no-break space is a character the author typed because
+   * the browser keeps it — `&emsp;` indenting an algorithm's loop body — and
+   * collapsing every `\s` lost it. Whitespace the browser does not draw at
+   * all goes: at the start and end of a line, between list items and table
+   * rows, beside a block. Collapsed to one space instead, the source
+   * indentation of a pretty-printed list became a blank line per item.
+   * Maths is left alone: it goes back into the deck as the TeX it came from.
+   */
+  const collapseAuthoredWhitespace = (root: HTMLElement): void => {
+    const COLLAPSIBLE_ONLY = /^[ \t\n\r\f]*$/;
+    const breaksLine = (node: Node): boolean => {
+      if (node.nodeType !== 1) return false;
+      if ((node as Element).tagName === 'BR') return true;
+      const display = computed(node as HTMLElement).display;
+      return display !== '' && !display.startsWith('inline') && display !== 'contents' && display !== 'none';
+    };
+    // Neighbours that draw nothing between this text and the next thing on the line.
+    const neighbour = (node: Node, forward: boolean): Node | null => {
+      let next = forward ? node.nextSibling : node.previousSibling;
+      while (next && (next.nodeType === 8
+        || (next.nodeType === 3 && COLLAPSIBLE_ONLY.test((next as Text).data)))) {
+        next = forward ? next.nextSibling : next.previousSibling;
+      }
+      return next;
+    };
+    const atLineEdge = (node: Node, forward: boolean): boolean => {
+      let current: Node = node;
+      for (;;) {
+        const next = neighbour(current, forward);
+        if (next) return breaksLine(next);
+        const parent = current.parentNode;
+        if (!parent || parent === root || breaksLine(parent)) return true;
+        current = parent;
+      }
+    };
+    const blockOf = (node: Node): Node => {
+      let current = node.parentNode;
+      while (current && current !== root && !breaksLine(current)) current = current.parentNode;
+      return current ?? root;
+    };
+    const verbatim = (text: Text): boolean => {
+      const parent = text.parentElement;
+      if (!parent || parent.closest('.katex, pre, code')) return true;
+      return /^(pre|break-spaces)/.test(computed(parent).whiteSpace);
+    };
+    const texts: Text[] = [];
+    const walker = root.ownerDocument.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
+    while (walker.nextNode()) texts.push(walker.currentNode as Text);
+    let previous: Text | null = null;
+    for (const text of texts) {
+      if (verbatim(text)) { previous = null; continue; }
+      let data = text.data.replace(/[ \t\n\r\f]+/g, ' ');
+      const container = text.parentElement?.tagName ?? '';
+      const followsSpace = previous !== null && previous.data.endsWith(' ')
+        && blockOf(previous) === blockOf(text);
+      if (data.startsWith(' ') && (followsSpace || atLineEdge(text, false))) data = data.slice(1);
+      if (data.endsWith(' ') && atLineEdge(text, true)) data = data.slice(0, -1);
+      if (data === '' || (data === ' ' && /^(UL|OL|TABLE|THEAD|TBODY|TFOOT|TR)$/.test(container))) {
+        text.remove();
+        continue;
+      }
+      if (data !== text.data) text.data = data;
+      previous = text;
+    }
+  };
+
+  /**
+   * `<li value="9">` restarts the numbering there: the items after it are 10,
+   * 11. The player draws its own numbers from the `list-item` counter, which
+   * Chromium does not move for a `value` — only that item read 9 and the
+   * next went back to where the old count was. A counter reset is what
+   * `value` means, so that is what the item carries into the deck.
+   */
+  const listValuesAsCounters = (root: HTMLElement): void => {
+    for (const item of root.querySelectorAll<HTMLElement>('ol > li[value]')) {
+      const value = Number.parseInt(item.getAttribute('value') ?? '', 10);
+      if (!Number.isFinite(value) || item.style.getPropertyValue('counter-set')) continue;
+      item.style.setProperty('counter-set', `list-item ${value}`);
+    }
+  };
+
   const CONTENT_TAGS = new Set(['img', 'video', 'svg', 'canvas', 'table', 'iframe']);
 
   const found = doc.querySelectorAll<HTMLElement>('section.slide, [data-slide-id]');
@@ -476,7 +654,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
   };
 
   const complexClippedMediaFrame = (node: HTMLElement): boolean => {
-    if (!independent || !supportsPseudoComputedStyle
+    if (!authoredHere(node) || !supportsPseudoComputedStyle
       || !node.querySelector(':scope > img, :scope > video')) return false;
     const style = computed(node);
     if (style.overflow !== 'hidden' && style.overflow !== 'clip') return false;
@@ -658,6 +836,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     if (complexClippedMediaFrame(node)) {
       node.dataset.element = 'html';
       node.dataset.fallbackReason = 'Clipped media frame with a CSS pseudo-element overlay';
+      walkFallbacks.add(node);
       return true;
     }
     // A clip path or a mask is the whole point of the element it is on, and
@@ -665,9 +844,13 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     // its paint alone turned a clipped triangle into a plain orange rectangle
     // and a masked panel into a solid one — silently, which is worse than the
     // conspicuous fallback.
-    if (independent && clippedOrMasked(node)) {
+    // Per node, not per page: an exported object keeps the inline clip it
+    // round-trips with, but a fresh one written into an export has nothing to
+    // carry it any more than in a `new` page.
+    if (authoredHere(node) && clippedOrMasked(node)) {
       node.dataset.element = 'html';
       node.dataset.fallbackReason = 'Clipped or masked CSS region';
+      walkFallbacks.add(node);
       return true;
     }
     if (CONTENT_TAGS.has(tag)) return true;
@@ -685,7 +868,14 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       // and its nested inline/block markup, while `independentTextHtml` bakes
       // the descendant typography. Exported deck documents retain the older
       // verbatim behaviour because their nested player wrappers are structural.
-      if (!independent) node.dataset.element = 'html';
+      // That stays a page-wide rule even for fresh markup in an export: the
+      // rich-text path depends on baking descendant typography, which a
+      // theme-driven page never does. The fallback is reported instead.
+      if (!independent) {
+        node.dataset.element = 'html';
+        node.dataset.fallbackReason = 'Prose mixed with block children';
+        walkFallbacks.add(node);
+      }
       return true;
     }
     // An exported text element carries the player's own wrappers (.text-body,
@@ -767,6 +957,15 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     return kept;
   };
 
+  /** How a warning names a node: its tag, its id, and its first classes. */
+  const describeNode = (node: Element): string => {
+    const id = node.getAttribute('data-element-id') ?? node.id;
+    const classes = [...node.classList]
+      .filter((name) => name !== 'element' && !name.startsWith('element-'))
+      .slice(0, 2).map((name) => `.${name}`).join('');
+    return `<${node.tagName.toLowerCase()}${id ? `#${id}` : ''}${classes}>`;
+  };
+
   /**
    * Inline style the browser silently threw away.
    *
@@ -781,11 +980,6 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
    * is reported instead of baked in.
    */
   const styleWarnings = (root: HTMLElement): string[] => {
-    const describeNode = (node: Element): string => {
-      const id = node.getAttribute('data-element-id') ?? node.id;
-      const classes = [...node.classList].slice(0, 2).map((name) => `.${name}`).join('');
-      return `<${node.tagName.toLowerCase()}${id ? `#${id}` : ''}${classes}>`;
-    };
     const clip = (text: string): string => (text.length > 90 ? `${text.slice(0, 87)}…` : text);
     const out: string[] = [];
     for (const node of [root, ...root.querySelectorAll('[style]')]) {
@@ -831,6 +1025,13 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
         }
         const property = text.slice(0, colon).trim().toLowerCase();
         if (!style || style.getPropertyValue(property)) continue;
+        // A shorthand reads back empty once a later declaration changes one
+        // of its parts — `border:0; border-bottom:2px solid` is a rule under
+        // a heading, applied exactly as written — so ask the parser about
+        // the declaration on its own before calling it dropped.
+        const alone = node.ownerDocument.createElement('div').style;
+        alone.cssText = text;
+        if (alone.length > 0) continue;
         out.push(`${describeNode(node)}: inline declaration "${clip(text)}" was dropped by the `
           + 'browser\'s CSS parser and is not applied');
       }
@@ -847,6 +1048,8 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
    * moment an agent is looking.
    */
   const unsupportedCssWarnings = (root: HTMLElement): string[] => {
+    // Per page: a theme-driven page carries inline CSS onto its objects as
+    // written, so there is nothing lost to warn about.
     if (!independent) return [];
     const out: string[] = [];
     const describe = (node: Element): string => {
@@ -884,6 +1087,14 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     return Math.round(Math.atan2(b, a) * (180 / Math.PI) * 100) / 100;
   };
 
+  /** Whether the computed transform mirrors the node: a flip, horizontal or vertical. */
+  const mirroredOf = (node: HTMLElement): boolean => {
+    const values = computed(node).transform.match(/matrix\(([^)]+)\)/);
+    if (!values) return false;
+    const [a, b, c, d] = values[1].split(',').map(Number);
+    return a * d - b * c < 0;
+  };
+
   const typeOf = (node: HTMLElement): string => {
     const tag = node.tagName.toLowerCase();
     if (tag === 'img') return 'image';
@@ -911,28 +1122,83 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     svg: HTMLElement,
     origin: DOMRect,
     rotation: number,
+    mirrored: boolean,
   ): MeasuredNode | null => {
     const tag = (node: Element): string => node.tagName.toLowerCase();
-    if (!independent) return null;
-    if (svg.querySelector('text, image, foreignObject, use, tspan')) return null;
+    const refuse = (why: string): null => {
+      svgRefusals.set(svg, why);
+      return null;
+    };
+    // An exported object is never an SVG of its own (the deck's HTML regions
+    // export wrapped), but whatever sits inside one is that object's markup.
+    if (!authoredHere(svg)) return null;
+    if (svg.querySelector('text, image, foreignObject, use, tspan')) {
+      return refuse('it holds text, an image or a <use> reference');
+    }
     const drawn = [...svg.querySelectorAll<SVGGraphicsElement>(
       'rect, circle, ellipse, line, path, polygon, polyline',
     )].filter((node) => !node.closest('defs, marker, clipPath, mask, pattern, symbol'));
-    if (drawn.length !== 1) return null;
+    if (drawn.length !== 1) {
+      return refuse(drawn.length === 0 ? 'it draws no primitive' : `it draws ${drawn.length} primitives`);
+    }
     const shape = drawn[0];
     const style = computed(shape as unknown as Element);
     const paint = (value: string): string | null =>
       !value || value === 'none' || value === 'rgba(0, 0, 0, 0)' ? null : value;
+    // `stroke-opacity` and `fill-opacity` thin one paint each; the deck has a
+    // colour per paint, so they fold into that colour's alpha. Dropped, a
+    // faded rule came back at full strength.
+    const withAlpha = (color: string | null, factor: number, property: string): string | null => {
+      if (!color || !(factor < 1)) return color;
+      const channels = /^rgba?\(([^)]*)\)$/.exec(color.trim())?.[1]
+        .split(/[\s,/]+/).filter(Boolean).map(Number);
+      if (!channels || channels.length < 3 || channels.some((value) => !Number.isFinite(value))) {
+        conversionWarnings.push(`<svg> <${tag(shape)}>: ${property}="${factor}" could not be folded into `
+          + `${color}, so the shape is drawn opaque; write the colour as rgba() instead.`);
+        return color;
+      }
+      const alpha = Math.round((channels[3] ?? 1) * Math.max(0, factor) * 1000) / 1000;
+      return `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${alpha})`;
+    };
+    const opacityOf = (value: string): number => {
+      const parsed = Number.parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : 1;
+    };
     // An open stroke is not flood-filled; SVG's default black `fill` on a
     // line means nothing and would arrive as a deck shape's fill colour.
-    const fill = tag(shape) === 'line' || tag(shape) === 'polyline' ? null : paint(style.fill);
-    const stroke = paint(style.stroke);
-    if (!fill && !stroke) return null;
+    const rawFill = tag(shape) === 'line' || tag(shape) === 'polyline' ? null : paint(style.fill);
+    const rawStroke = paint(style.stroke);
+    if (!rawFill && !rawStroke) return refuse('its primitive paints nothing');
     if (style.getPropertyValue('clip-path') !== 'none'
-      || style.getPropertyValue('mask') !== 'none') return null;
+      || style.getPropertyValue('mask') !== 'none') return refuse('its primitive is clipped or masked');
     // A gradient or pattern paint server is a URL reference; a deck shape
     // holds a colour.
-    if ([fill, stroke].some((value) => value?.includes('url('))) return null;
+    if ([rawFill, rawStroke].some((value) => value?.includes('url('))) {
+      return refuse('it paints with a gradient or a pattern');
+    }
+    const fill = withAlpha(rawFill, opacityOf(style.getPropertyValue('fill-opacity')), 'fill-opacity');
+    const stroke = withAlpha(rawStroke, opacityOf(style.getPropertyValue('stroke-opacity')), 'stroke-opacity');
+    // `opacity` is not inherited: the primitive's own, each group's around
+    // it and the SVG's multiply, and the deck element carries the product.
+    let opacity = 1;
+    for (let node: Element | null = shape as unknown as Element; node; node = node.parentElement) {
+      opacity *= opacityOf(computed(node).opacity);
+      if (node === svg) break;
+    }
+    opacity = Math.round(opacity * 1000) / 1000;
+    // The deck breaks a stroke into dashes (three widths on, two off) or dots
+    // (round dots two widths apart). Whatever pattern the author wrote maps to
+    // the nearer of the two: dashes no longer than the line is wide read as
+    // dots, anything longer as dashes. A pattern with no gaps is solid.
+    const dashLengths = (style.getPropertyValue('stroke-dasharray') || 'none').trim() === 'none' ? []
+      : style.getPropertyValue('stroke-dasharray').split(/[\s,]+/)
+        .map((value) => Number.parseFloat(value)).filter((value) => Number.isFinite(value) && value >= 0);
+    const pattern = dashLengths.length % 2 === 1 ? [...dashLengths, ...dashLengths] : dashLengths;
+    const userStrokeWidth = parseFloat(style.strokeWidth) || 0;
+    const strokeDash = !rawStroke || !pattern.some((value, index) => index % 2 === 1 && value > 0)
+      || !pattern.some((value) => value > 0)
+      ? null
+      : pattern.every((value, index) => index % 2 === 1 || value <= userStrokeWidth) ? 'dotted' : 'dashed';
 
     const svgRect = svg.getBoundingClientRect();
     const box = svg as unknown as SVGSVGElement;
@@ -948,7 +1214,8 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       elementId: svg.dataset.elementId ?? null,
       classes: [],
       rotation,
-      opacity: Number(computed(svg).opacity) || 1,
+      ...(mirrored ? { mirrored } : {}),
+      opacity,
       style: {},
       html: '',
       attrs: {},
@@ -958,6 +1225,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       element: 'shape',
       ...(fill ? { fill } : {}),
       ...(stroke ? { stroke } : {}),
+      ...(strokeDash ? { strokeDash } : {}),
       ...(marker('marker-start') ? { arrowStart: 'true' } : {}),
       ...(marker('marker-end') ? { arrowEnd: 'true' } : {}),
       ...extra,
@@ -974,7 +1242,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     // draws a line across its box horizontally, turned by `rot`.
     if (tag(shape) === 'line') {
       const matrix = shape.getScreenCTM?.();
-      if (!matrix) return null;
+      if (!matrix) return refuse('its line has no geometry here');
       const point = (x: number, y: number) => ({
         x: matrix.a * x + matrix.c * y + matrix.e,
         y: matrix.b * x + matrix.d * y + matrix.f,
@@ -983,13 +1251,14 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       const from = point(geometry.x1.baseVal.value, geometry.y1.baseVal.value);
       const to = point(geometry.x2.baseVal.value, geometry.y2.baseVal.value);
       const length = Math.hypot(to.x - from.x, to.y - from.y);
-      if (length <= 0) return null;
+      if (length <= 0) return refuse('its line has no length');
       const thickness = Math.max(1, strokeWidth * scale);
       const angle = Math.round(Math.atan2(to.y - from.y, to.x - from.x)
         * (180 / Math.PI) * 100) / 100;
+      // In a mirrored frame the line turns the other way.
       return {
         ...common,
-        rotation: Math.round((rotation + angle) * 100) / 100,
+        rotation: Math.round((mirrored ? rotation - angle : rotation + angle) * 100) / 100,
         dataset: dataset({
           shape: marker('marker-start') || marker('marker-end') ? 'arrow' : 'line',
           strokeWidth: String(Math.round(thickness * 100) / 100),
@@ -1051,13 +1320,13 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       : vertices.length >= 2
         ? `M${vertices.join(' L')}${tag(shape) === 'polygon' ? ' Z' : ''}`
         : '';
-    if (!d.trim()) return null;
+    if (!d.trim()) return refuse('its path is empty');
     // The deck draws a path into `0 0 w h`; a viewBox that starts elsewhere
     // would shift every coordinate, so such an SVG stays a fallback.
-    if (view && (view.x !== 0 || view.y !== 0)) return null;
+    if (view && (view.x !== 0 || view.y !== 0)) return refuse('its viewBox does not start at 0 0');
     const width = view?.width || svgRect.width;
     const height = view?.height || svgRect.height;
-    if (!(width > 0) || !(height > 0)) return null;
+    if (!(width > 0) || !(height > 0)) return refuse('it has no size');
     return {
       ...common,
       dataset: dataset({
@@ -1075,12 +1344,13 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     origin: DOMRect,
     rotation: number,
     rawStyle: string | null,
+    mirrored: boolean,
   ): MeasuredNode => {
     const rect = node.getBoundingClientRect();
     const style = computed(node);
     const tag = node.tagName.toLowerCase();
     if (tag === 'svg') {
-      const shape = svgShape(node, origin, rotation);
+      const shape = svgShape(node, origin, rotation, mirrored);
       if (shape) return shape;
     }
     // Inline declarations only, never computed ones. A computed style is
@@ -1268,6 +1538,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       dataset: { ...node.dataset } as Record<string, string>,
       rect: box,
       rotation,
+      ...(mirrored ? { mirrored } : {}),
       // Verbatim markup still carries its authored CSS inside the isolated
       // shadow root. Reapplying presentation or opacity to the slide-element
       // wrapper doubles filters, borders and alpha (a .24 SVG became .0576).
@@ -1308,6 +1579,11 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
         objectFit: style.objectFit || undefined,
         objectPosition: style.objectPosition || undefined,
         textAlign: style.textAlign || undefined,
+        // A box that centres its own text with flexbox: the text sits where
+        // the flex alignment puts it, not where text-align alone would.
+        flexDirection: /flex$/.test(style.display) ? style.flexDirection || 'row' : undefined,
+        justifyContent: /flex$/.test(style.display) ? style.justifyContent || undefined : undefined,
+        alignItems: /flex$/.test(style.display) ? style.alignItems || undefined : undefined,
         // Absent means "the deck's default" (all three on: a slide video
         // normally plays itself) — unless the export said "false", which it
         // does for a deck video that has the flag off.
@@ -1315,13 +1591,15 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
         muted: node.hasAttribute('muted') || (node.dataset.muted === 'false' ? false : undefined),
         autoplay: node.hasAttribute('autoplay') || (node.dataset.autoplay === 'false' ? false : undefined),
         controls: node.hasAttribute('controls') || undefined,
+        start: node.tagName === 'OL' ? node.getAttribute('start') ?? undefined : undefined,
+        reversed: (node.tagName === 'OL' && node.hasAttribute('reversed')) || undefined,
       },
       verbatim,
       ...(verbatim ? {
         css: capturedCss,
         fallbackReason: node.dataset.element === 'html'
           ? (node.dataset.fallbackReason ?? 'Explicit HTML fallback')
-          : `${tag.toUpperCase()} is preserved as HTML`,
+          : `${tag.toUpperCase()} is preserved as HTML${svgRefusals.has(node) ? `: ${svgRefusals.get(node)}` : ''}`,
       } : {}),
     };
   };
@@ -1343,8 +1621,14 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     pseudo: '::before' | '::after',
     origin: DOMRect,
   ): MeasuredNode | null => {
+    // Per page, not per node: on a theme-driven page the pseudo-elements are
+    // the theme's (and fresh nodes wear the player's classes while measured),
+    // which the player draws again by itself — converted, they would paint twice.
     if (!independent || !supportsPseudoComputedStyle
       || owner.closest('[data-element="html"]')) return null;
+    // The marker the authoring list rules draw is the player's, not a
+    // decoration of the author's.
+    if (pseudo === '::before' && markerless.has(owner)) return null;
     const style = view.getComputedStyle(owner, pseudo);
     if (!style.content || style.content === 'none' || style.content === 'normal') return null;
     // A generated counter or image has no literal to carry across.
@@ -1444,11 +1728,75 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     };
   };
 
+  /**
+   * A section's own state that is not on the slide: `<aside class="notes">`
+   * (its speaker notes) and `<script type="application/deckwerk-timeline">`
+   * (its builds, when the objects' attributes cannot say them all).
+   */
+  const slideState = (child: HTMLElement): 'notes' | 'timeline' | null => {
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'aside' && child.classList.contains('notes')) return 'notes';
+    if (tag === 'script' && child.getAttribute('type') === 'application/deckwerk-timeline') return 'timeline';
+    return null;
+  };
+  const stateOf = (root: HTMLElement, kind: 'notes' | 'timeline'): string | undefined => {
+    const holder = ([...root.children] as HTMLElement[]).find((child) => slideState(child) === kind);
+    return holder ? holder.textContent ?? '' : undefined;
+  };
+
+  /**
+   * The width the browser gave each column of a table, or null when the
+   * cells cannot say.
+   *
+   * Read from the cells' geometry on the table's grid, not from the first
+   * row: a group-header row (`<th colspan="3">`) has fewer cells than the
+   * table has columns, and reading it threw the authored `<col>` widths away
+   * for equal ones. A column starts where any cell starting in it starts and
+   * ends where any cell ending in it ends, so one spanning row does not hide
+   * the columns another row spells out.
+   */
+  const tableColumnWidths = (table: HTMLTableElement): number[] | null => {
+    const rows = [...table.rows];
+    const taken: boolean[][] = rows.map(() => []);
+    const starts = new Map<number, number>();
+    const ends = new Map<number, number>();
+    let columns = 0;
+    rows.forEach((row, r) => {
+      let column = 0;
+      for (const cell of [...row.cells]) {
+        while (taken[r][column]) column += 1;
+        const span = Math.max(1, cell.colSpan || 1);
+        // rowspan="0" runs to the end of the table.
+        const down = cell.rowSpan === 0 ? rows.length - r : Math.max(1, cell.rowSpan || 1);
+        for (let rr = r; rr < Math.min(rows.length, r + down); rr += 1) {
+          for (let cc = column; cc < column + span; cc += 1) taken[rr][cc] = true;
+        }
+        const box = cell.getBoundingClientRect();
+        if (box.width > 0) {
+          if (!starts.has(column)) starts.set(column, box.left);
+          if (!ends.has(column + span - 1)) ends.set(column + span - 1, box.right);
+        }
+        column += span;
+      }
+      columns = Math.max(columns, column);
+    });
+    if (columns === 0) return null;
+    const widths: number[] = [];
+    for (let column = 0; column < columns; column += 1) {
+      const left = starts.get(column) ?? ends.get(column - 1);
+      const right = ends.get(column) ?? starts.get(column + 1);
+      if (left === undefined || right === undefined) return null;
+      widths.push(Math.round(right - left));
+    }
+    return widths.every((width) => width > 0) ? widths : null;
+  };
+
   return roots.map((root) => {
     // Checked before anything below touches a node: assigning through
     // node.style re-serialises the attribute from the CSSOM, which would
     // repair the very breakage this is meant to catch.
     const warnings = [...styleWarnings(root), ...unsupportedCssWarnings(root)];
+    conversionWarnings = [];
     // Collect first, then style, then measure. The player wraps every object
     // in an element wrapper carrying the type class, and the deck's type
     // sizes hang off those classes -- so without this pass the compiler would
@@ -1463,6 +1811,9 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     // with it, so dissolving the container does not silently drop the build.
     const collect = (node: HTMLElement, build: { spec: string | null }): void => {
       for (const child of [...node.children] as HTMLElement[]) {
+        // The slide's speaker notes and its timeline ride inside the section
+        // but are not on the slide, whatever a page's own CSS does to them.
+        if (node === root && slideState(child)) continue;
         if (hidden(child)) continue;
         if (isContent(child)) {
           if (!child.dataset.build && build.spec) {
@@ -1486,7 +1837,7 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
             if (scope.spec) { child.dataset.build = scope.spec; scope.spec = 'withPrev'; }
             objects.push(child);
             synthetic.add(child);
-          } else if (independent && !ignorableComputed(
+          } else if (authoredHere(child) && !ignorableComputed(
             'background-image', computed(child).backgroundImage.trim())) {
             // A photograph or gradient *behind* content is not something a
             // deck shape can hold, and the layout box carrying it is about to
@@ -1510,17 +1861,45 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       // The deck's table *is* a text element with column widths, so the only
       // thing missing was the measurement: take the widths the browser just
       // computed and the rest of the mapping already exists.
+      // Per page, unlike the SVG conversion: the deck table's text takes its
+      // typography from the descendant styles an independent page bakes, and
+      // a theme-driven page never bakes them, so a table there measured short
+      // of what the player draws.
       if (independent && node.tagName.toLowerCase() === 'table' && !node.dataset.element) {
         node.dataset.element = 'table';
-        const row = node.querySelector('tr');
-        const cells = row ? ([...row.children] as HTMLElement[]) : [];
-        const spanned = cells.some((cell) => (cell as HTMLTableCellElement).colSpan > 1);
-        const widths = cells.map((cell) => Math.round(cell.getBoundingClientRect().width));
-        // Column widths are proportions; a spanning first row cannot supply
-        // them, and the mapping falls back to equal columns without them.
-        if (!spanned && widths.length > 0 && widths.every((width) => width > 0)) {
-          node.dataset.tableWidths = widths.join(',');
+        const widths = tableColumnWidths(node as HTMLTableElement);
+        // Column widths are proportions; without them the mapping falls back
+        // to equal columns.
+        if (widths) node.dataset.tableWidths = widths.join(',');
+      }
+      // `<pre><code class="language-python">` is how the web writes a code
+      // listing, so it is a code block, not a monospace text box that would
+      // lose its language and its highlighting.
+      if (!node.dataset.element && node.tagName.toLowerCase() === 'pre') {
+        const only = node.children.length === 1 ? node.firstElementChild as HTMLElement : null;
+        const named = /(?:^|\s)lang(?:uage)?-([\w+#-]+)/.exec(
+          `${node.className} ${only?.tagName.toLowerCase() === 'code' ? only.className : ''}`);
+        if (named) {
+          node.dataset.element = 'code';
+          node.dataset.language ??= named[1];
         }
+      }
+      // A listing written to start on its own line, `<code>` then a newline,
+      // means the code starts on the next line. HTML drops that newline only
+      // straight after `<pre>`, so the browser would show (and measure) a
+      // blank first line the slide does not have.
+      if (node.dataset.element === 'code') {
+        const only = node.children.length === 1 && node.firstElementChild?.tagName.toLowerCase() === 'code'
+          ? node.firstElementChild : node;
+        const first = only.firstChild;
+        if (first && first.nodeType === 3 && (first as Text).data.startsWith('\n')) {
+          (first as Text).data = (first as Text).data.slice(1);
+        }
+        // `data-font-size` is the size the block renders at; CSS cannot read
+        // it, so lay the listing out at it here or the box is measured at
+        // the stylesheet's default size.
+        const size = Number.parseFloat(node.dataset.fontSize ?? '');
+        if (size > 0 && !node.style.fontSize) node.style.fontSize = `${size}px`;
       }
       // A leaf with nothing to say but paint — an empty div with a background
       // — is a rectangle, not an empty text box.
@@ -1548,19 +1927,21 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
       // part of what it holds.
       if (typeOf(node) === 'text' && !/^(pre|code)$/.test(node.tagName.toLowerCase())
         && !node.querySelector(':scope > .text-body > [data-text-content]')) {
-        const collapsed = node.innerHTML.replace(/\s+/g, ' ').trim();
-        if (collapsed !== node.innerHTML) node.innerHTML = collapsed;
+        collapseAuthoredWhitespace(node);
+        listValuesAsCounters(node);
       }
     }
     // Force layout with the new classes applied before anything is measured.
     void doc.body.offsetHeight;
 
-    // Rotation is recorded, then taken off before measuring: a bounding rect
-    // is axis-aligned, so a 543x1 rule at 90 degrees would otherwise measure
-    // 1x543 and come back as a different shape. The deck stores the
-    // *untransformed* box and rotates about its centre at render time, which
-    // is exactly what the page reports with the transform removed.
+    // Rotation (and whether the transform mirrors, a flip) is recorded, then
+    // taken off before measuring: a bounding rect is axis-aligned, so a 543x1
+    // rule at 90 degrees would otherwise measure 1x543 and come back as a
+    // different shape. The deck stores the *untransformed* box and rotates
+    // about its centre at render time, which is exactly what the page
+    // reports with the transform removed.
     const angles = objects.map(angleOf);
+    const mirrors = objects.map(mirroredOf);
     // Snapshot the style attributes first: assigning through node.style
     // re-serialises the whole attribute, which would rewrite every authored
     // #000000 as rgb(0, 0, 0) before we ever read it.
@@ -1569,7 +1950,20 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
     void doc.body.offsetHeight;
 
     const origin = root.getBoundingClientRect();
-    const nodes = objects.map((node, index) => measure(node, origin, angles[index], rawStyles[index]));
+    const nodes = objects.map((node, index) => measure(node, origin, angles[index], rawStyles[index], mirrors[index]));
+    // A region kept as HTML still moves and resizes, but nothing inside it can
+    // be edited — and an agent only finds that out from the apply. So every
+    // fallback this page *made* is said: the walk's own, and markup that
+    // stayed HTML for want of a conversion. An HTML region the deck already
+    // holds coming back as itself, or one the author declared, is not news.
+    const where = root.dataset.slideId ? `slide ${root.dataset.slideId}: ` : '';
+    objects.forEach((node, index) => {
+      const measured = nodes[index];
+      if (!measured.verbatim || (node.dataset.element === 'html' && !walkFallbacks.has(node))) return;
+      warnings.push(`${where}${describeNode(node)} was kept as an HTML fallback (${measured.fallbackReason}): `
+        + 'it moves and resizes, but nothing inside it can be edited as slide objects.');
+    });
+    warnings.push(...conversionWarnings.map((warning) => `${where}${warning}`));
     // Put the attribute back exactly as authored — not through the CSSOM, which
     // would leave an empty `style=""` behind and re-serialise every colour — so
     // measuring the same document again reads what the first pass read.
@@ -1589,6 +1983,22 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
         nodes[index].style = Object.fromEntries(Object.entries(nodes[index].style)
           .filter(([property]) => property.startsWith('background')
             || ['border-radius', 'box-shadow', 'filter', 'mix-blend-mode'].includes(property)));
+        // A theme-driven page keeps only inline declarations, so a fresh box
+        // whose picture came from a class would arrive with no paint at all —
+        // an empty object. Like `boxPaint`, this is a fresh object each
+        // compile, so its computed paint is safe to carry.
+        if (!independent && !Object.keys(nodes[index].style).some((property) => property.startsWith('background'))) {
+          const paint = computed(node);
+          for (const property of [
+            'background-color', 'background-image', 'background-size', 'background-position',
+            'background-repeat', 'border-radius', 'box-shadow',
+          ]) {
+            const value = paint.getPropertyValue(property).trim();
+            if (!ignorableComputed(property, value)) {
+              nodes[index].style[property] = property === 'background-image' ? deckRelativeUrls(value) : value;
+            }
+          }
+        }
         nodes[index].html = '';
         return;
       }
@@ -1683,11 +2093,18 @@ export function measureSlides(doc: Document): MeasuredSlide[] {
         css: '',
         fallbackReason: 'Complex CSS slide background',
       });
+      warnings.push(`${where}the slide's CSS background is a layered or gradient paint the deck background `
+        + 'cannot hold, so it was kept as an HTML fallback behind the slide\'s objects.');
     }
     return {
       id: root.dataset.slideId ?? null,
       name: root.dataset.name ?? '',
-      notes: root.dataset.notes ?? '',
+      notes: stateOf(root, 'notes') ?? root.dataset.notes ?? '',
+      ...(stateOf(root, 'notes') === undefined && root.dataset.notes === undefined ? { notesAbsent: true } : {}),
+      ...(root.dataset.skipped !== undefined
+        ? { skipped: root.dataset.skipped.trim().toLowerCase() !== 'false' }
+        : {}),
+      ...(stateOf(root, 'timeline') !== undefined ? { timeline: stateOf(root, 'timeline') } : {}),
       background: { color: background, image: image ? image[1] : null },
       morphFromPrevious: root.dataset.morphFromPrevious === 'true',
       ...(root.dataset.layout !== undefined ? {

@@ -1,14 +1,21 @@
 /**
  * Opt-in access control for the collab server (`--access <adminLogin>`).
  *
- * Identity comes from Tailscale, not from accounts: the server binds loopback
- * and sits behind `tailscale serve`, which terminates TLS on the tailnet and
- * stamps every proxied request with `Tailscale-User-Login` /
- * `Tailscale-User-Name` headers. Those headers are trusted ONLY when the
- * socket peer is loopback — off-loopback they could be forged by whoever set
- * them, so such connections are rejected outright. A bare loopback request
- * without the headers is someone at the machine itself (SSH, curl, the
- * launchd owner) and counts as the admin.
+ * Identity comes from Tailscale, not from accounts, by one of two routes:
+ *
+ * - The server terminates TLS itself on the tailnet address (`tls` option)
+ *   and asks tailscaled `whois` for each connection's peer
+ *   (tailscaleIdentity.ts). That answer comes from the WireGuard key, so it
+ *   cannot be forged, and any identity headers on such a connection are
+ *   ignored.
+ * - The server binds loopback behind `tailscale serve`, which stamps every
+ *   proxied request with `Tailscale-User-Login` / `Tailscale-User-Name`.
+ *   Those headers are trusted ONLY when the socket peer is loopback —
+ *   off-loopback they could be forged by whoever set them, so such
+ *   connections are rejected outright.
+ *
+ * A bare loopback request without the headers is someone at the machine
+ * itself (SSH, curl, the launchd owner) and counts as the admin.
  *
  * A second door, for people off the tailnet, is a Cloudflare Tunnel behind
  * Cloudflare Access on a listener of its own (cloudflareAccess.ts). On that
@@ -139,6 +146,13 @@ function headerValue(request: IncomingMessage, name: string): string {
 }
 
 /**
+ * Connections the server terminated TLS for on the tailnet address, with the
+ * tailnet user tailscaled named for the peer (tailscaleIdentity.ts), or null
+ * when it named nobody. Set before the connection's first request is handled.
+ */
+export const tailnetIdentities = new WeakMap<object, Identity | null>();
+
+/**
  * Resolve who is making this request, or null if nobody trustworthy is.
  * Null means "reject": with access control on, every byte the server emits
  * is tied to a tailnet identity.
@@ -147,6 +161,11 @@ export function resolveIdentity(
   request: IncomingMessage,
   config: AccessControlConfig,
 ): Identity | null {
+  // A tailnet connection is whoever tailscaled says owns the peer's key. Its
+  // own Tailscale-User-* headers are ignored: on this socket nobody vouches
+  // for them, the peer could have typed them. Checked first: nor does anyone
+  // vouch for Cloudflare headers or view-link cookies such a peer sends.
+  if (tailnetIdentities.has(request.socket)) return tailnetIdentities.get(request.socket) ?? null;
   // The tunnel daemon connects over loopback too, and passes through whatever
   // headers the visitor sent: only the token Cloudflare signed says who it is.
   if (isCloudflareRequest(request)) return cloudflareIdentityOf(request);

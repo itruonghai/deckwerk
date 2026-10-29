@@ -18,6 +18,11 @@
   --accent: #3b82f6;
   --danger: #e0463c;
   --build-orange: #f59e0b;
+  /* Build-order numbers, on the canvas and in the Build panel. One fixed blue
+     in both UI themes, since the canvas badges sit on the slide, not the
+     chrome; white text, held up by the weight. */
+  --build-mark: #0588ff;
+  --on-build-mark: #fff;
 }
 
 * { box-sizing: border-box; }
@@ -73,6 +78,29 @@ body.mac-titlebar #toolbar { padding-left: 84px; }
   white-space: nowrap;
 }
 .bar-deck-name[hidden] { display: none; }
+.bar-history-button[aria-expanded="true"],
+.bar-icon-button[aria-expanded="true"] { background: var(--panel-2); }
+
+/* Panels opened from the toolbar: the deck's history under its name (it was
+   a sidebar tab) and the media library under Media (#99's tab). */
+.panel-popover {
+  position: fixed;
+  z-index: 10020;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-height: min(560px, calc(100vh - 80px));
+  overflow-y: auto;
+  padding: 4px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 45%);
+}
+.media-popover { width: 400px; max-height: min(640px, calc(100vh - 80px)); padding: 4px 6px 10px; }
+.panel-popover > #history,
+.panel-popover > #media { padding: 8px 12px 4px; }
 .bar-group {
   display: flex;
   align-items: center;
@@ -116,6 +144,7 @@ body.welcome-mode .toolbar-expanded-file-actions { display: inline-flex; }
 }
 #toolbar.toolbar-compact-secondary .toolbar-expanded-secondary-actions { display: none; }
 #toolbar.toolbar-compact-secondary .toolbar-compact-secondary-action { display: inline-block; }
+#toolbar.toolbar-compact-insert .bar-center :is(.bar-icon-button, .shape-menu-trigger) > span { display: none; }
 
 .bar-right { margin-left: auto; }
 
@@ -152,7 +181,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 button.primary {
   border-color: transparent;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
 }
 
 /* The one style for a side-panel's block action ("Open Morph editor…",
@@ -311,6 +341,15 @@ body.panel-resizing iframe { pointer-events: none; }
 
 .canvas-host.drop-active { box-shadow: inset 0 0 0 3px var(--accent); }
 
+/* Hand-panning: an open hand while Space is held, a closed one while a
+   Space or middle-button drag moves the view. Over every handle and box, so
+   nothing suggests the press will select or resize; the zoom bar, which a
+   press does not pan from, keeps its own. */
+.canvas-host.space-pan,
+.canvas-host.space-pan .stage * { cursor: grab !important; }
+.canvas-host.is-panning,
+.canvas-host.is-panning * { cursor: grabbing !important; }
+
 .canvas-host .stage {
   position: absolute;
   box-shadow: 0 8px 40px rgb(0 0 0 / 50%);
@@ -363,6 +402,184 @@ body.panel-resizing iframe { pointer-events: none; }
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
+.zoom-controls .rulers-toggle {
+  display: grid;
+  place-items: center;
+}
+
+.zoom-controls .light-table-toggle { display: grid; place-items: center; }
+.zoom-controls .light-table-toggle.active { background: var(--accent-soft); color: var(--accent); }
+
+/* The light table (lightTable.ts): every slide as a card over the canvas, the
+   editor's side of Speaker View's G grid. */
+.light-table {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.light-table-header {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.light-table-header .insp-title { margin: 0; }
+.light-table-header .insp-hint { flex: 1; margin: 0; }
+.light-table-close { flex: none; }
+.light-table-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 22px 18px;
+  align-content: start;
+  justify-items: center;
+  padding: 18px 20px 28px;
+}
+.light-table-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 11px var(--mono);
+  cursor: pointer;
+}
+.light-table-thumb {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 0 0 1px var(--line), 0 4px 14px rgb(0 0 0 / 30%);
+  pointer-events: none;
+}
+.light-table-card:hover .light-table-thumb { box-shadow: 0 0 0 1px var(--muted), 0 4px 14px rgb(0 0 0 / 30%); }
+.light-table-card.active .light-table-thumb { box-shadow: 0 0 0 2px var(--accent), 0 4px 14px rgb(0 0 0 / 30%); }
+.light-table-card.active { color: var(--accent); }
+.light-table-card.skipped .light-table-thumb { opacity: 0.45; }
+.light-table-card.dragging { opacity: 0.4; }
+.light-table-card.drop-before .light-table-thumb { box-shadow: -4px 0 0 var(--accent), 0 0 0 1px var(--line); }
+.light-table-card.drop-after .light-table-thumb { box-shadow: 4px 0 0 var(--accent), 0 0 0 1px var(--line); }
+
+.zoom-controls .rulers-toggle.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Rulers (rulers.ts): along the top and left of the canvas, in slide units.
+   The canvas keeps the slide clear of them (setRulerInset), so they never
+   cover it at the fitted zoom. Everything is drawn from the chrome tokens, so
+   both UI themes follow without rules of their own. */
+.canvas-ruler {
+  position: absolute;
+  z-index: 18;
+  display: block;
+  overflow: hidden;
+  background: var(--panel-2);
+  user-select: none;
+}
+
+.canvas-ruler[hidden],
+.canvas-ruler [hidden] { display: none; }
+
+.canvas-ruler-top {
+  top: 0;
+  left: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.canvas-ruler-left {
+  top: 20px;
+  left: 0;
+  border-right: 1px solid var(--line);
+}
+
+.canvas-ruler-corner {
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The span the slide covers is lighter than the pasteboard on either side. */
+.canvas-ruler-slide { fill: var(--panel); }
+.canvas-ruler-selection { fill: color-mix(in srgb, var(--accent) 30%, transparent); }
+.canvas-ruler-ticks { fill: none; stroke: var(--muted); stroke-width: 1; }
+.canvas-ruler-pointer { stroke: var(--text); stroke-width: 1; }
+
+.canvas-ruler-label {
+  fill: var(--muted);
+  font: 9px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-host.design-preview-active > .canvas-ruler { display: none; }
+
+/* The comparison chip under two selected pictures (compareChip.ts): the zoom
+   pill's dress, in the scaled overlay. `--editor-inv-scale` undoes the stage
+   scale so it is one size at any zoom; it hangs 12 screen pixels below the
+   point it is placed at, or above it with `.above`. */
+.compare-chip {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  height: 28px;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  backdrop-filter: blur(8px);
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: auto;
+  transform-origin: 0 0;
+  transform: scale(var(--editor-inv-scale, 1)) translate(-50%, 12px);
+}
+
+.compare-chip.above {
+  transform: scale(var(--editor-inv-scale, 1)) translate(-50%, calc(-100% - 12px));
+}
+
+.compare-chip > button,
+.compare-chip > .compare-chip-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: 11.5px/1 var(--mono, system-ui);
+  letter-spacing: 0.02em;
+}
+
+/* Stated with the app's own button states, which come later in this file. */
+.compare-chip > .compare-chip-label { color: var(--muted); }
+.compare-chip > :last-child { border-right: 0; }
+.compare-chip > button { cursor: pointer; }
+.compare-chip > button:hover:not(:disabled):not(.is-active) { background: var(--panel-2); border-color: var(--line); }
+.compare-chip > button:active:not(:disabled):not(.is-active) { background: var(--panel-2); }
+.compare-chip > button.is-active,
+.compare-chip > button.is-active:hover:not(:disabled) { background: var(--accent); color: var(--on-accent, #fff); border-color: var(--accent); }
+.compare-chip > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.compare-chip svg { flex: none; }
+
 /* Speaker notes: a floating toggle in the canvas corner, styled like the zoom
    pill, and a drawer along the bottom of the canvas that it opens. The drawer
    height lives on the canvas host as --notes-drawer-height (see panelResize),
@@ -385,8 +602,11 @@ body.panel-resizing iframe { pointer-events: none; }
   cursor: pointer;
 }
 
+/* Beside the left ruler when the rulers are shown (RULER_SIZE in rulers.ts). */
+.canvas-host.rulers-shown > .notes-toggle { left: calc(20px + 12px); }
+
 .notes-toggle:hover { background: var(--panel-2); }
-.notes-toggle.active { color: var(--accent); }
+.notes-toggle.active { color: var(--accent-text, var(--accent)); }
 
 .notes-toggle .notes-toggle-dot {
   position: absolute;
@@ -717,6 +937,69 @@ body.panel-resizing iframe { pointer-events: none; }
   pointer-events: auto;
   transform: translate(-50%, -50%) rotate(45deg) !important;
 }
+
+/* The pen and point editing: the outline being drawn or edited, the segment
+   the next click would add, and the points and their handles — square points,
+   round handles, as in every vector editor. Canvas coordinates, counter-scaled
+   by --inv like the rest of the selection chrome. */
+.canvas-host.pen-tool,
+.canvas-host.pen-tool .stage *,
+.canvas-host.pencil-tool,
+.canvas-host.pencil-tool .stage * { cursor: crosshair !important; }
+
+.path-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.path-overlay path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The pencil's stroke in progress is drawn as the ink it will be. */
+.path-overlay .pencil-overlay-stroke { stroke-linecap: round; stroke-linejoin: round; }
+
+.path-overlay-outline { stroke-width: calc(1.5px * var(--inv)); }
+.path-overlay-stalks { stroke-width: calc(1px * var(--inv)); }
+.path-overlay-preview {
+  stroke-width: calc(1px * var(--inv));
+  stroke-dasharray: calc(4px * var(--inv)) calc(3px * var(--inv));
+}
+
+.path-anchor,
+.path-knob {
+  position: absolute;
+  box-sizing: border-box;
+  width: calc(9px * var(--inv));
+  height: calc(9px * var(--inv));
+  transform: translate(-50%, -50%);
+  border: calc(1.5px * var(--inv)) solid var(--accent);
+  background: #fff;
+  pointer-events: auto;
+  cursor: move;
+}
+
+.path-anchor { border-radius: calc(1.5px * var(--inv)); z-index: 1; }
+.path-anchor.selected { background: var(--accent); }
+/* The first point, under a pen that would close the shape there. */
+.path-anchor.closing {
+  box-shadow: 0 0 0 calc(3px * var(--inv)) color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.path-knob {
+  width: calc(7px * var(--inv));
+  height: calc(7px * var(--inv));
+  border-radius: 50%;
+}
+
+/* A path whose points are being edited shows them, not its box. */
+.sel-box.path-editing { outline: none; }
 
 .guide {
   position: absolute;
@@ -1064,13 +1347,14 @@ body.panel-resizing iframe { pointer-events: none; }
   flex: none;
   display: grid;
   place-items: center;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  border-radius: 9px;
-  background: var(--build-orange);
-  color: #fff;
-  font: 700 10.5px/1 system-ui, sans-serif;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--build-mark);
+  color: var(--on-build-mark);
+  font: 600 11.5px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Read-only paragraph rows inside a by-paragraph card: number + snippet. */
@@ -1120,25 +1404,32 @@ body.panel-resizing iframe { pointer-events: none; }
 /* The trigger is the card's headline: what makes this step fire. */
 .timeline-row select.build-trigger {
   flex: 1;
-  border-color: color-mix(in srgb, var(--build-orange) 55%, transparent);
-  color: var(--build-orange);
+  color: var(--text);
   font-weight: 650;
 }
 
-/* Numbered marker on the canvas for elements a build entry animates. */
+/* Numbered marker on the canvas for elements a build entry animates. Sized
+   in screen pixels: scale(var(--inv)) undoes the stage's zoom, so the badge
+   is the same 24px at any zoom and its text is laid out at that size rather
+   than magnified. A white ring and a soft shadow lift it off any slide,
+   photos included; several builds on one object widen it into a pill
+   ("1,3"). */
 .build-badge {
   position: absolute;
   z-index: 6;
   display: grid;
   place-items: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--build-orange);
-  box-shadow: 0 0 0 calc(1.5px * var(--inv, 1)) rgb(255 255 255 / 85%);
-  color: #fff;
-  font: 700 11px/1 system-ui, sans-serif;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 12px;
+  background: var(--build-mark);
+  box-shadow: 0 0 0 2px #fff, 0 1px 5px 1px rgb(0 0 0 / 35%);
+  color: var(--on-build-mark);
+  font: 600 13px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
   transform: translate(-55%, -45%) scale(var(--inv, 1));
 }
 
@@ -1285,6 +1576,18 @@ body.panel-resizing iframe { pointer-events: none; }
   left: 0;
   transform-origin: top left;
 }
+
+/* Every miniature is a layer of its own, and so is the stroke drawn over it
+   (.rail-thumb::after). Unlayered, Safari repainted a miniature's pictures,
+   scaling each full-size bitmap down on the main thread, whenever anything
+   in its row changed: each live sync while someone typed (a slide of 29
+   photos made every keystroke wait 150-300 ms), and each step through the
+   deck, when the old and the new row change their highlight (350-820 ms
+   onto slides of large photographs; editingLatencyBrowser.test.ts). The
+   layer is the miniature's frame, a couple of hundred pixels wide: layering
+   the slide-sized surface inside it instead cost 60 MB a row. */
+.rail-thumb,
+.rail-thumb::after { will-change: transform; }
 
 /* Thumbnail-only rows: no title, no element count. */
 .rail-item {
@@ -1498,7 +1801,7 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   padding: 5px 10px;
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 10px;
   text-align: left;
 }
@@ -1517,7 +1820,7 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   font-size: 10px;
   text-align: left;
 }
-.history-group-toggle:hover { color: var(--accent); text-decoration: underline; }
+.history-group-toggle:hover { color: var(--accent-text, var(--accent)); text-decoration: underline; }
 .history-group-steps {
   margin: 2px 0 0 10px;
   padding-left: 8px;
@@ -1577,12 +1880,13 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
 .text-selection-style { display: grid; gap: 6px; margin: 4px 0 8px; }
 .text-selection-style .button-row { display: grid; gap: 4px; }
 .text-selection-style button { padding: 5px 2px; font-size: 10px; }
-.text-selection-style .text-format-buttons { grid-template-columns: repeat(5, 1fr); }
+.text-selection-style .text-format-buttons { grid-template-columns: repeat(6, 1fr); }
 .text-format-bold { font-weight: 800; }
 .text-format-italic { font-style: italic; }
 .text-format-underline { text-decoration: underline; }
+.text-format-strikethrough { text-decoration: line-through; }
 /* The glyph pair "x²"/"x₂" already carries the meaning; keep it from
-   crowding the narrower five-across row. */
+   crowding the narrower six-across row. */
 .text-format-superscript,
 .text-format-subscript { letter-spacing: -0.02em; }
 .text-format-buttons button[aria-pressed="true"] {
@@ -1599,7 +1903,8 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   background: var(--panel-2);
 }
 
-.build-element-row {
+.build-element-row,
+.object-list-row {
   display: block;
   overflow: hidden;
   width: 100%;
@@ -1614,9 +1919,11 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   cursor: pointer;
 }
 
-.build-element-row:hover { background: rgb(255 255 255 / 6%); }
+.build-element-row:hover,
+.object-list-row:hover:not(.locked) { background: rgb(255 255 255 / 6%); }
 
-.build-element-row.selected {
+.build-element-row.selected,
+.object-list-row.selected {
   background: var(--accent-soft, rgb(59 130 246 / 22%));
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -1628,7 +1935,7 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
 
 .insp-subtitle {
   margin: 8px 0 5px;
-  color: var(--yellow);
+  color: var(--text);
   font-size: 10.5px;
   font-weight: 650;
   letter-spacing: 0.08em;
@@ -1722,7 +2029,7 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   border: 0;
   border-left: 1px solid rgb(255 255 255 / 35%);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
   font-size: 20px;
   font-weight: 400;
   line-height: 1;
@@ -1740,6 +2047,12 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
 .z-order-row button { min-width: 0; padding: 4px 2px; font-size: 10px; }
 
 .video-playback-options > .panel-action { margin: 0 0 7px; }
+/* Play in sync: under the flag strip, and its status line when the video is grouped. */
+.video-playback-options > .field-check { margin: 8px 0 0; }
+.video-playback-options > .insp-hint { margin: 8px 0 6px; }
+/* Wipe: the divider slider, then its one action. */
+.media-compare-options > .field-opacity { margin-bottom: 0; }
+.media-compare-options > .panel-action { margin: 8px 0 0; }
 .video-checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1827,12 +2140,13 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   border-radius: 50%;
   place-items: center;
   background: var(--accent);
-  color: white;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
   font: 8px/1 system-ui, sans-serif;
 }
 .morph-actions { margin-bottom: 8px; }
 .morph-actions button { flex: 1; }
-.morph-message { color: var(--accent); }
+.morph-message { color: var(--accent-text, var(--accent)); }
 .morph-lists {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1878,9 +2192,10 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
 .morph-list-item.paired .morph-list-badge {
   border-radius: 50%;
   background: var(--accent);
-  color: white;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
 }
-.morph-list-item.paired .morph-list-pick { color: var(--accent); }
+.morph-list-item.paired .morph-list-pick { color: var(--accent-text, var(--accent)); }
 .morph-list-item.selected-source {
   background: rgb(245 158 11 / 10%);
   box-shadow: inset 0 0 0 1px #f59e0b;
@@ -1918,7 +2233,7 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
 }
-.morph-modal > header h2 { margin: 0; font: 600 14px var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: .08em; }
+.morph-modal > header h2 { margin: 0; font: 600 14px var(--mono); color: var(--text); text-transform: uppercase; letter-spacing: .08em; }
 .morph-modal-content { overflow: auto; padding: 14px 18px 18px; }
 .morph-modal-content .morph-instruction { min-height: 0; text-align: center; }
 .morph-modal-content .morph-preview-label { font-size: 11px; text-align: left; }
@@ -1927,24 +2242,29 @@ input[type="range"] { accent-color: var(--accent); padding: 0; background: trans
 
 /* ============================================================= */
 /* Final design layer: terminal-inspired. Monospace UI, hard      */
-/* right angles, muted pastel accents on a deep neutral ground.   */
+/* right angles, one blue accent on a deep neutral ground.       */
 /* Later rules override the earlier refresh wholesale.            */
 /* ============================================================= */
 
 :root {
-  --bg: #16161e;
-  --panel: #1a1b26;
-  --panel-2: #20212e;
-  --line: #2c2e3d;
-  --text: #c0caf5;
-  --muted: #565f89;
-  --accent: #7aa2f7;      /* pastel blue */
-  --accent-soft: rgb(122 162 247 / 12%);
-  --green: #9ece6a;
-  --yellow: #e0af68;
-  --danger: #f7768e;      /* pastel red */
+  /* The dark roles of appChrome.css again, over the older layers above. */
+  --bg: var(--zinc-950);
+  --panel: var(--zinc-900);
+  --panel-2: var(--zinc-800);
+  --line: var(--zinc-800);
+  --text: var(--zinc-200);
+  --muted: var(--zinc-400);
+  --accent: var(--azure-550);
+  --accent-soft: var(--azure-900);
+  --green: var(--green-400);
+  --yellow: var(--amber-400);
+  --danger: var(--red-400);
   --radius: 0;
   --mono: "Monaspace Krypton", monospace;
+  /* Slide rail thumbnails: a light hairline and a soft drop, so a black
+     slide still has an edge against the dark rail. */
+  --rail-thumb-hairline: rgb(255 255 255 / 22%);
+  --rail-thumb-lift: 0 1px 3px rgb(0 0 0 / 60%);
 }
 
 html, body {
@@ -1988,10 +2308,10 @@ button:hover:not(:disabled) {
 button.primary {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-weight: 600;
 }
-button.primary:hover:not(:disabled) { background: rgb(122 162 247 / 22%); }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
 
 .bar-select {
   border: 1px solid var(--line);
@@ -2009,26 +2329,35 @@ button.primary:hover:not(:disabled) { background: rgb(122 162 247 / 22%); }
   background: transparent;
 }
 .rail-item:hover { background: var(--panel-2); border-color: var(--line); }
-.rail-item.selected { background: rgb(122 162 247 / 7%); border-color: rgb(122 162 247 / 55%); }
+.rail-item.selected { background: var(--accent-soft); border-color: var(--accent); }
 .rail-item.active { background: var(--accent-soft); border-color: var(--accent); }
 
 .rail-num { font: 10px var(--mono); color: var(--muted); }
-.rail-item.selected .rail-num { color: var(--accent); }
-.rail-item.active .rail-num { color: var(--accent); }
+.rail-item.selected .rail-num { color: var(--accent-text, var(--accent)); }
+.rail-item.active .rail-num { color: var(--accent-text, var(--accent)); }
 
 .rail-thumb {
-  --rail-thumb-stroke: var(--line);
+  --rail-thumb-stroke: var(--rail-thumb-hairline);
   border: 0;
-  /* Keep the stroke out of the thumbnail's layout box. The rendered slide
-     fills this box exactly, so a real border offsets it toward the top-left
-     and clips the opposite edges instead of framing it symmetrically. */
-  box-shadow: inset 0 0 0 1px var(--rail-thumb-stroke);
+  box-shadow: var(--rail-thumb-lift);
 }
-.rail-item.selected .rail-thumb { --rail-thumb-stroke: rgb(122 162 247 / 65%); }
+/* Keep the stroke out of the thumbnail's layout box. The rendered slide
+   fills this box exactly, so a real border offsets it toward the top-left
+   and clips the opposite edges instead of framing it symmetrically. The
+   slide also paints over the box's own inset shadow, so the stroke lives on
+   an overlay drawn above it. */
+.rail-thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 0 1px var(--rail-thumb-stroke);
+  pointer-events: none;
+}
+.rail-item.selected .rail-thumb { --rail-thumb-stroke: var(--accent); }
 .rail-item.active .rail-thumb { --rail-thumb-stroke: var(--accent); }
 
 /* Canvas: flat, focused. */
-.canvas-host { background: #101017; }
+.canvas-host { background: var(--canvas-ground); }
 .canvas-host .stage { box-shadow: 0 0 0 1px var(--line), 0 18px 50px rgb(0 0 0 / 60%); border-radius: 0; }
 
 /* Panels read like a TUI: uppercase mono section headers, ruled groups. */
@@ -2048,7 +2377,9 @@ button.primary:hover:not(:disabled) { background: rgb(122 162 247 / 22%); }
   border-color: var(--line);
   border-bottom-color: var(--panel);
   background: var(--panel);
-  color: var(--accent);
+  /* The label is accent text; a bar of the accent itself marks the tab. */
+  box-shadow: inset 0 2px 0 var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .insp-group {
@@ -2059,13 +2390,13 @@ button.primary:hover:not(:disabled) { background: rgb(122 162 247 / 22%); }
 
 .insp-group h3 {
   font: 10px var(--mono);
-  color: var(--yellow);
+  color: var(--text);
   letter-spacing: 0.12em;
 }
 
 .insp-title {
   font: 600 12px var(--mono);
-  color: var(--green);
+  color: var(--text);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -2100,7 +2431,11 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
 .guide { background: var(--danger); }
 .measure { --measure-color: var(--danger); }
 .measure-size { --measure-color: var(--accent); }
-.marquee { border-color: var(--accent); background: var(--accent-soft); }
+/* The marquee and the tint on a box being typed into lie over slide content,
+   so they take a see-through wash of the accent, never --accent-soft: that is
+   an opaque swatch for buttons and rail rows, and over the slide it hid every
+   object the marquee swept and whatever sat behind the box being edited. */
+.marquee { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* Timeline + status. */
 .step-block { border: 1px solid var(--line); background: transparent; }
@@ -2133,8 +2468,8 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   #status[data-busy="true"]::before { animation-duration: 1400ms; }
 }
 
-/* The element being typed into. */
-.element.editing { outline-color: var(--accent); box-shadow: inset 0 0 0 100vmax var(--accent-soft); }
+/* The element being typed into (see the marquee above). */
+.element.editing { outline-color: var(--accent); box-shadow: inset 0 0 0 100vmax color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* Colour picker: theme palette and full RGBA controls open in one popover. */
 .field-color { flex-direction: row; align-items: center; gap: 8px; }
@@ -2170,7 +2505,7 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 12%);
 }
 .color-picker-trigger.is-theme { box-shadow: 0 0 0 1px var(--accent); }
-.color-picker-trigger.is-css { box-shadow: 0 0 0 1px var(--yellow); }
+.color-picker-trigger.is-css { box-shadow: 0 0 0 1px var(--muted); }
 .color-picker-source-badge {
   position: absolute;
   right: 1px;
@@ -2182,13 +2517,15 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   border: 1px solid rgb(255 255 255 / 75%);
   border-radius: 3px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
   font: 700 8px/1 var(--mono);
   box-shadow: 0 1px 3px rgb(0 0 0 / 45%);
 }
 .color-picker-css-badge {
   width: 22px;
-  background: #a86d00;
+  background: var(--text);
+  color: var(--panel);
   font-size: 7px;
   letter-spacing: -.04em;
 }
@@ -2217,13 +2554,13 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   align-items: center;
   margin-bottom: 10px;
   padding: 7px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line));
+  border: 1px solid var(--line);
   border-radius: 5px;
-  background: color-mix(in srgb, var(--yellow) 8%, transparent);
+  background: var(--panel-2);
   color: var(--muted);
   font: 10px/1.25 var(--mono);
 }
-.color-picker-source-note strong { color: var(--yellow); font-size: 9px; }
+.color-picker-source-note strong { color: var(--text); font-size: 9px; }
 .color-picker-palette {
   display: flex;
   flex-wrap: wrap;
@@ -2357,13 +2694,19 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   padding: 0;
 }
 
-/* The desktop eyedropper: a still of the window, and a loupe of its pixels. */
+/* The captured eyedropper: a still of the window or shared screen, and a loupe of its pixels. */
 .eyedropper-overlay {
   position: fixed;
   inset: 0;
   z-index: 2147483647;
-  background-size: 100% 100%;
+  background: #000;
   cursor: crosshair;
+}
+.eyedropper-still {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .eyedropper-loupe {
   position: absolute;
@@ -2406,7 +2749,7 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   color: var(--text);
   font-size: 11px;
 }
-.color-picker-clear-theme { color: var(--accent); }
+.color-picker-clear-theme { color: var(--accent-text, var(--accent)); }
 
 
 /* Sidebar trim preview: the frame under the handle. */
@@ -2529,7 +2872,7 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
   padding: 6px 10px;
   text-align: left;
 }
-#ctx-menu button:hover { background: var(--accent-soft); color: var(--accent); }
+#ctx-menu button:hover { background: var(--accent-soft); color: var(--accent-text, var(--accent)); }
 .ctx-sep { border-top: 1px solid var(--line); margin: 4px 6px; }
 #ctx-menu .ctx-heading {
   color: var(--muted);
@@ -2787,7 +3130,7 @@ input[type="range"] { accent-color: var(--accent); border: 0; background: transp
 }
 .layout-editor-header > div:first-child { display: flex; flex-direction: column; gap: 3px; }
 .layout-editor-header > div:first-child span {
-  color: var(--accent);
+  color: var(--muted);
   font: 700 8px/1 var(--mono);
   letter-spacing: .1em;
   text-transform: uppercase;
@@ -3024,7 +3367,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
   vertical-align: 1px;
 }
 
-.agent-chat-status[data-state="ready"]::before { background: #4ade80; }
+.agent-chat-status[data-state="ready"]::before { background: var(--green); }
 .agent-chat-status[data-state="busy"]::before { background: var(--accent); }
 .agent-chat-status[data-state="error"]::before { background: var(--danger); }
 
@@ -3101,9 +3444,9 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 .agent-chat-fast-mode[hidden] { display: none; }
 
 .agent-chat-fast-mode.active {
-  border-color: #f59e0b;
-  background: rgb(245 158 11 / 14%);
-  color: #fbbf24;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text, var(--accent));
 }
 
 .agent-chat-scratchpad-bar {
@@ -3214,7 +3557,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
   width: 100%;
   border-color: transparent;
   background: var(--accent);
-  color: white;
+  color: var(--on-accent, #fff);
   font-weight: 600;
 }
 
@@ -3253,6 +3596,17 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 }
 
 .agent-chat-connect-copy { flex: none; align-self: center; }
+
+/* A hosted deck hands over a prompt, not a one-line command: let it wrap. */
+.agent-chat-connect-prompt .agent-chat-connect-row { flex-direction: column; }
+.agent-chat-connect-prompt .agent-chat-connect-row code {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.agent-chat-connect-prompt .agent-chat-connect-copy { align-self: flex-end; }
 
 .agent-chat-connect-alt {
   display: flex;
@@ -3318,7 +3672,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 .agent-chat-message-system .agent-chat-message-body,
 .agent-chat-message.error .agent-chat-message-body {
   border-color: color-mix(in srgb, var(--danger) 60%, var(--line));
-  color: #ffb4ad;
+  color: var(--danger);
 }
 
 .agent-chat-error {
@@ -3327,7 +3681,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
   padding: 7px 9px;
   border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--line));
   border-radius: 6px;
-  color: #ffb4ad;
+  color: var(--danger);
   font-size: 11px;
 }
 
@@ -3357,10 +3711,10 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 .agent-chat-composer-actions { display: flex; align-items: center; gap: 6px; }
 .agent-chat-hint { color: var(--muted); font-size: 10px; }
 .agent-chat-action { min-width: 64px; }
-.agent-chat-stop { min-width: 54px; border-color: transparent; background: var(--danger); color: white; }
+.agent-chat-stop { min-width: 54px; border-color: transparent; background: var(--danger); color: var(--on-danger, white); font-weight: 600; }
 .agent-chat-stop[hidden] { display: none; }
-.agent-chat-action.ui-button-primary { border-color: transparent; background: var(--accent); color: white; }
-.agent-chat-action.ui-button-danger { border-color: transparent; background: var(--danger); color: white; }
+.agent-chat-action.ui-button-primary { border-color: transparent; background: var(--accent); color: var(--on-accent, #fff); font-weight: 600; }
+.agent-chat-action.ui-button-danger { border-color: transparent; background: var(--danger); color: var(--on-danger, white); font-weight: 600; }
 
 @media (max-width: 560px) {
   .agent-chat-panel {
@@ -3397,7 +3751,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 .workflow-dialog h2 {
   margin: 0;
   font: 600 14px var(--mono);
-  color: var(--accent);
+  color: var(--text);
   text-transform: uppercase;
   letter-spacing: .08em;
 }
@@ -3425,6 +3779,27 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
 .link-media-status { margin: 0; line-height: 1.5; }
 .link-media-status.link-media-error { color: var(--danger); }
 .confirm-dialog-description { margin: 0; color: var(--text); line-height: 1.5; }
+/* Update available: the release notes scroll inside the dialog, so a long
+   changelog never pushes the Download button off screen. */
+.confirm-dialog.update-dialog { width: min(560px, calc(100vw - 48px)); }
+.update-notes {
+  max-height: min(320px, 45vh);
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+.update-notes > :first-child { margin-top: 0; }
+.update-notes > :last-child { margin-bottom: 0; }
+.update-notes h3, .update-notes h4 { margin: 12px 0 6px; font-size: inherit; font-weight: 600; }
+.update-notes ul, .update-notes ol { margin: 6px 0; padding-left: 20px; }
+.update-notes p { margin: 6px 0; }
+.update-notes code, .update-notes pre { font-family: var(--mono); }
+.update-notes pre { white-space: pre-wrap; }
+.update-notes-text { white-space: pre-wrap; }
+.update-notes-empty { color: var(--muted); }
 .paste-theme-description { margin: 0; color: var(--text); }
 .paste-theme-detail { margin: 0; color: var(--muted); line-height: 1.6; }
 .paste-theme-actions { flex-wrap: wrap; }
@@ -3536,7 +3911,7 @@ button.morph-object-hit.selected-source:hover:not(:disabled) {
   text-align: left;
 }
 /* Someone is in the deck now. */
-.deck-picker-live { color: var(--accent); font-weight: 600; }
+.deck-picker-live { color: var(--accent-text, var(--accent)); font-weight: 600; }
 button.deck-picker-row:hover { border-color: var(--line); background: var(--panel-2); }
 button.deck-picker-row.active { border-color: var(--accent); }
 .deck-picker-name, .deck-picker-cell {
@@ -3624,9 +3999,10 @@ button.deck-picker-row.active { border-color: var(--accent); }
 .web-export-detail { margin: 0; min-height: 3.6em; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .pdf-export-builds { padding: 8px 0 4px; }
 
-/* Object names in the build and Morph lists carry colour swatches so two
-   shapes of the same geometry are still told apart at a glance. */
+/* Object names in the build, Morph and object lists carry colour swatches so
+   two shapes of the same geometry are still told apart at a glance. */
 .build-element-row,
+.object-list-row,
 .build-target-name,
 .morph-list-label {
   display: flex;
@@ -3710,6 +4086,39 @@ select.panel-action-select {
   border-color: var(--line);
 }
 
+/* The Pen: the tool itself, and a narrow segment for how it draws. */
+.pen-tool-control { display: inline-flex; }
+.pen-tool-control .pen-tool-button { border-radius: 6px 0 0 6px; }
+.pen-tool-menu {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  padding: 0;
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+}
+.pen-tool-menu svg { color: var(--muted); }
+.pen-tool-menu[aria-expanded="true"] { background: var(--panel-2); border-color: var(--line); }
+/* A menu entry's keyboard shortcut, quiet and to the right of its name. */
+.shape-menu-shortcut {
+  margin-left: auto;
+  padding-left: 16px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+}
+.shape-menu-item:hover:not(:disabled) .shape-menu-shortcut { color: var(--on-accent, #fff); }
+.shape-menu-item[aria-checked] .shape-menu-shortcut + * { margin-left: 0; }
+.shape-menu-item:has(.shape-menu-shortcut)[aria-checked]::after { margin-left: 6px; }
+
+/* The Pen stays pressed while it is drawing. */
+.pen-tool-button[aria-pressed="true"],
+.pen-tool-button[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 24%, var(--panel-2));
+}
+.pen-tool-button[aria-pressed="true"] .bar-icon { color: var(--accent); }
+
 .toolbar-split-button {
   display: inline-grid;
   grid-template-columns: minmax(0, 1fr) 30px;
@@ -3765,8 +4174,8 @@ select.panel-action-select {
 /* `:not(:disabled)` matches the specificity of the generic button hover
    rule, which otherwise wins the background and leaves white text on the
    plain hover grey (unreadable in light mode). */
-.shape-menu-item:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: transparent; }
-.shape-menu-item:hover:not(:disabled) svg { color: #fff; }
+.shape-menu-item:hover:not(:disabled) { background: var(--accent); color: var(--on-accent, #fff); font-weight: 600; border-color: transparent; }
+.shape-menu-item:hover:not(:disabled) svg { color: var(--on-accent, #fff); }
 .shape-menu-item[aria-checked]::after { content: ''; width: 1em; margin-left: auto; text-align: right; }
 .shape-menu-item[aria-checked="true"]::after { content: '✓'; }
 .shape-menu-item svg { flex: none; color: var(--muted); }
@@ -3866,7 +4275,7 @@ select.panel-action-select {
   padding: 0 5px;
   border-radius: 10px 10px 10px 2px;
   background: var(--comment);
-  color: #1a1b26;
+  color: var(--zinc-900);
   font: 700 11px/20px var(--mono, system-ui), sans-serif;
   text-align: center;
   box-shadow: 0 2px 6px rgb(0 0 0 / 35%);
@@ -3874,7 +4283,7 @@ select.panel-action-select {
 .comment-slide-mark[data-count]::after { transform: translate(-30%, 30%) scale(var(--inv, 1)); transform-origin: top right; }
 
 .rail-item.has-comments .rail-thumb {
-  box-shadow: inset 0 0 0 1px var(--rail-thumb-stroke, var(--line)), 0 0 0 2px var(--comment);
+  box-shadow: 0 0 0 2px var(--comment), var(--rail-thumb-lift);
 }
 .rail-comment-count {
   position: absolute;
@@ -3885,7 +4294,7 @@ select.panel-action-select {
   padding: 0 4px;
   border-radius: 8px 8px 8px 2px;
   background: var(--comment);
-  color: #1a1b26;
+  color: var(--zinc-900);
   font: 700 10px/16px var(--mono, system-ui), sans-serif;
   text-align: center;
   pointer-events: none;
@@ -3902,7 +4311,6 @@ select.panel-action-select {
   flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-top: 2px solid var(--comment);
   box-shadow: 0 10px 32px rgb(0 0 0 / 50%);
   overflow: hidden;
 }
@@ -3938,7 +4346,7 @@ select.panel-action-select {
 
 .cthread {
   border: 1px solid var(--line);
-  border-left: 3px solid var(--comment);
+  border-left: 3px solid var(--muted);
   background: var(--panel-2, var(--panel));
   padding: 6px 8px 8px;
 }
@@ -3964,7 +4372,7 @@ select.panel-action-select {
   background: transparent;
   color: var(--text);
 }
-.cthread-head .cthread-resolve { color: var(--comment); }
+.cthread-head .cthread-resolve { color: var(--accent-text, var(--accent)); }
 .cthread-where {
   min-width: 0;
   overflow: hidden;
@@ -4013,7 +4421,8 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
   border: 0;
   border-radius: 6px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
   padding: 6px 10px;
   cursor: pointer;
 }
@@ -4036,7 +4445,7 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
 .brand-button:not(:disabled):hover {
   border-color: var(--line);
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .about-dialog {
@@ -4133,7 +4542,8 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
 
 .align-button.is-active, .segment-button.is-active {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
 }
 
 /* Stand-in drag image for slide reordering; see SlideRail.makeDragImage. */
@@ -4259,17 +4669,45 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
 .field-segmented { position: relative; }
 .field-segmented:focus-within .segmented-buttons { box-shadow: 0 0 0 1px var(--accent); }
 
-/* --- 1. Geometry: opacity and arrange share the last row --- */
+/* --- 1. Geometry: one labelled row each for Position, Size and Rotate, as
+   Keynote's Arrange pane has them, then Opacity and Layer --- */
 
-.geometry-bottom-row {
+.geometry-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 128px;
+  grid-template-columns: 56px repeat(2, minmax(0, 1fr));
   align-items: end;
-  gap: 8px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
-.geometry-bottom-row > .field { margin-bottom: 0; min-width: 0; }
-.geometry-bottom-row .field-opacity-controls { height: 28px; grid-template-columns: minmax(0, 1fr) 36px; gap: 6px; }
-.geometry-bottom-row .field-opacity output { font-size: 10.5px; }
+.geometry-row:last-child { margin-bottom: 0; }
+.geometry-row > .field { margin-bottom: 0; min-width: 0; }
+/* The row's name sits level with its inputs, not with their captions. */
+.geometry-row-label {
+  overflow: hidden;
+  color: var(--text);
+  font: 10px var(--mono);
+  letter-spacing: 0.08em;
+  line-height: 32px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+/* Flip and Arrange stand as tall as the number fields beside them. */
+.geometry-row .align-strip { box-sizing: border-box; height: 32px; }
+.geometry-row .align-strip > .align-strip-button { height: 100%; }
+.geometry-rotate {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: end;
+  gap: 6px;
+  min-width: 0;
+}
+.geometry-rotate > .field { margin-bottom: 0; min-width: 0; }
+/* Opacity spans both cells; the row already names it. */
+.geometry-row > .geometry-opacity { grid-column: 2 / -1; }
+.geometry-opacity > span { display: none; }
+.geometry-opacity .field-opacity-controls { height: 32px; grid-template-columns: minmax(0, 1fr) 36px; gap: 6px; margin-bottom: 0; }
+.geometry-opacity output { font-size: 10.5px; }
 .field-arrange .align-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .z-order-row { grid-template-columns: none; gap: 0; }
 .z-order-row button { padding: 0; font-size: inherit; }
@@ -4369,7 +4807,7 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
   margin-bottom: 6px;
 }
 .text-style-row > .field { margin-bottom: 0; min-width: 0; }
-.text-selection-style .text-format-buttons { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.text-selection-style .text-format-buttons { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .text-selection-style button { height: 26px; padding: 0; }
 .field-color.field-color-stacked { flex-direction: column; align-items: stretch; gap: 3px; }
 .field-color-stacked .color-picker-trigger { width: 100%; height: 26px; }
@@ -4384,6 +4822,9 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
 }
 .text-list-row:has(> .field-color-stacked) { grid-template-columns: minmax(0, 1fr) 98px; }
 .text-list-row > .field { margin-bottom: 0; min-width: 0; }
+/* Indent sits under the marker colour, the same width. */
+.text-indent-row { grid-template-columns: minmax(0, 1fr) 98px; }
+.text-indent-row > .text-indent { grid-column: 2; }
 .font-fallback-note[hidden] { display: none; }
 .font-fallback-note {
   padding: 0;
@@ -4401,6 +4842,8 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
   gap: 6px;
 }
 .video-playback-options > .panel-action { width: auto; margin: 0; padding: 0 10px; height: 26px; font-size: 10.5px; white-space: nowrap; }
+/* A synced group's length: a strip of its own, the width of the panel. */
+.video-playback-options > .sync-length-field { grid-column: 1 / -1; margin: 2px 0 0; }
 .video-checkbox-grid {
   display: grid;
   grid-auto-flow: column;
@@ -4436,7 +4879,7 @@ button.cthread-where:disabled { cursor: default; opacity: 1; }
   clip: rect(0 0 0 0);
   opacity: 0;
 }
-.toggle-segment:has(> input:checked) { background: var(--accent); color: #fff; }
+.toggle-segment:has(> input:checked) { background: var(--accent); color: var(--on-accent, #fff); font-weight: 600; }
 .toggle-segment:has(> input:indeterminate) { background: var(--accent-soft); color: var(--text); }
 .toggle-segment:has(> input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .toggle-segment > .toggle-segment-short { font: 10.5px var(--mono); letter-spacing: 0; text-transform: none; }
@@ -4524,28 +4967,59 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
 .build-element-row[data-kind="image"]::before { content: '▣'; }
 .build-element-row[data-kind="video"]::before { content: '▶'; }
 .build-element-row[data-kind="html"]::before { content: '<>'; letter-spacing: -0.1em; }
+.build-element-row[data-kind="code"]::before { content: '{}'; letter-spacing: -0.1em; }
 .build-element-row[data-kind="unsupported"]::before { content: '?'; }
 .build-element-row[data-kind^="shape"]::before { content: '■'; }
 .build-element-row[data-kind="shape-ellipse"]::before { content: '●'; }
 .build-element-row[data-kind="shape-line"]::before { content: '╱'; }
 .build-element-row[data-kind="shape-arrow"]::before { content: '→'; }
 .build-element-row[data-kind="shape-path"]::before { content: '∿'; }
-/* The steps that animate this element, drawn as the same orange badge the
+/* The steps that animate this element, drawn as the same blue badge the
    canvas uses, from a data attribute so the row's text stays its name. */
 .build-element-row[data-steps]::after {
   content: attr(data-steps);
   flex: none;
+  min-width: 18px;
   margin-left: auto;
-  padding: 0 5px;
-  height: 15px;
-  border-radius: 8px;
-  background: var(--build-orange);
-  color: #000;
-  font: 700 9.5px/15px var(--mono);
+  padding: 0 6px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--build-mark);
+  color: var(--on-build-mark);
+  font: 600 11px/18px system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
   white-space: nowrap;
 }
 .build-elements-section > .panel-action { margin: 0 0 4px; }
 .build-add-paragraph { white-space: nowrap; }
+
+/* Preview and Play slide head the panel as two standard buttons; the one
+   playing turns into an accented Stop. */
+.build-preview-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.build-preview-controls > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  height: 30px;
+  white-space: nowrap;
+}
+/* Stop keeps its accent outline under the pointer, where it was just clicked. */
+.build-preview-controls > button.primary:hover:not(:disabled) { border-color: var(--accent); }
+.build-preview-icon { flex: none; font-size: 12px; line-height: 1; letter-spacing: -0.12em; }
+.build-preview-label { overflow: hidden; text-overflow: ellipsis; }
+/* The preview plays over the slide from outside the canvas host (see
+   EditorCanvas.beginPlayback); the slide and its handles wait underneath. */
+.build-preview-shield { position: fixed; z-index: 30; overflow: hidden; }
+.build-preview-frame { position: absolute; }
+.canvas-host.build-previewing > .stage > :is(.slide-layer, .overlay-layer) { opacity: 0; }
 
 .step-label { margin-bottom: 4px; }
 .timeline-row { gap: 6px; padding: 6px; }
@@ -4559,6 +5033,79 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
 .build-delay-wrap > input { padding: 3px 24px 3px 6px; height: 24px; }
 .build-card-what { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; }
 .build-action-label { color: var(--muted); font: 9.5px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+/* Equation builds: the highlight colour spans the card; the pulse size is a small number. */
+.build-card-what > .build-term-color { grid-column: 1 / -1; }
+.build-scale-wrap { width: 72px; }
+
+/* Build order: one compact row per build under the click that starts it, so
+   the slide's choreography reads at a glance (timelinePanel.ts). */
+.build-overview { display: flex; flex-direction: column; gap: 2px; max-height: 340px; overflow-y: auto; }
+.build-overview-step {
+  margin: 8px 0 3px;
+  color: var(--muted);
+  font: 9.5px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.build-overview-step:first-child { margin-top: 0; }
+.build-overview-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "num name effect" "num when when";
+  column-gap: 8px;
+  row-gap: 1px;
+  align-items: center;
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.build-overview-row:hover { background: rgb(255 255 255 / 5%); }
+.build-overview-row.selected { border-color: var(--accent); background: var(--accent-soft); }
+.build-overview-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.build-overview-row.dragging { opacity: 0.4; }
+.build-overview-row[data-drop-mode="before"] { box-shadow: inset 0 2px 0 var(--accent); }
+.build-overview-row[data-drop-mode="after"] { box-shadow: inset 0 -2px 0 var(--accent); }
+.build-overview-row[data-drop-mode="fuse"] { outline: 2px solid var(--accent); background: var(--accent-soft); }
+.build-overview-row > .build-num { grid-area: num; }
+.build-overview-row > .build-target-name { grid-area: name; overflow: hidden; font-size: 11px; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.build-overview-effect { grid-area: effect; color: var(--text); font: 10.5px var(--mono); white-space: nowrap; }
+.build-overview-when { grid-area: when; color: var(--muted); font: 10px var(--mono); }
+/* A build that runs on its own (after or with the one before) sits under it. */
+.build-overview-row:not([data-trigger="click"]) { margin-left: 14px; }
+
+/* The picked build's settings: a label column and the control beside it. */
+.build-detail-section .timeline-row { padding: 2px 0 0; }
+.build-detail-section .build-card-body.build-field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  padding-left: 0;
+}
+.build-field > .build-trigger-strip,
+.build-field > .build-action,
+.build-field > select:not(.build-trigger) { grid-column: 2; min-width: 0; }
+.build-field > .build-action ~ * { grid-column: 2; }
+.build-field > .build-trigger-strip { display: grid; grid-auto-flow: row; grid-template-columns: minmax(0, 1fr); }
+.build-field > .build-trigger-strip .segment-button { justify-content: flex-start; text-align: left; padding: 0 10px; }
+.build-wait { display: inline-flex; align-items: center; gap: 6px; }
+.build-wait-label { min-width: 104px; color: var(--muted); font: 10.5px var(--mono); text-align: center; }
+.build-wait-step {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.build-wait-step:disabled { opacity: 0.4; }
+.build-field .build-trigger-strip .segment-button { height: 26px; font-size: 10.5px; white-space: nowrap; }
+.build-field > .build-delay-wrap,
+.build-field > .build-duration-wrap,
+.build-field > .pop-size { justify-self: start; }
+.build-timing-sentence { margin: 2px 0 0; }
+.build-scale-wrap > input { padding: 3px 20px 3px 6px; height: 24px; width: 100%; }
 /* A shadow's direction: the knob, then Angle and Distance. */
 .shadow-direction-row { grid-template-columns: 40px repeat(2, minmax(0, 1fr)); }
 .angle-dial {
@@ -4586,9 +5133,17 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
 .duration-field .duration-number { flex: 0 0 76px; }
 .duration-field .duration-number > input { width: 100%; padding: 3px 24px 3px 6px; height: 24px; }
 .build-duration-wrap { width: 100%; }
-.timeline-row select.build-action { padding: 2px 20px 2px 6px; height: 24px; font: 10.5px var(--mono); }
+.pop-size { width: 76px; }
+.pop-size > input { width: 100%; padding: 3px 24px 3px 6px; height: 24px; }
+.timeline-row select.build-action, .timeline-row select.build-term { padding: 2px 20px 2px 6px; height: 24px; font: 10.5px var(--mono); }
+/* A build on some of a code block's lines: which lines, and a button to move it to the picked ones. */
+.build-lines-label { font: 10.5px var(--mono); color: var(--text); }
+.build-lines-use { margin-left: auto; padding: 2px 6px; font-size: 11px; }
+.build-line-text { font-family: var(--mono); white-space: pre; }
+/* A highlight's tint sits in its labelled row; the swatch carries no label of its own. */
+.build-line-color { margin: 0; padding: 0; border: 0; justify-content: flex-start; }
+.build-line-color > span:first-child { display: none; }
 .timeline-row select.build-trigger { flex: none; }
-.build-num { min-width: 16px; height: 16px; font: 700 9.5px/1 var(--mono); color: #000; }
 
 /* --- Design: canvas previews, the Props layout picker, rail design captions --- */
 .design-slide-preview {
@@ -4610,7 +5165,8 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
   padding: 4px 9px;
   border-radius: 3px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
   font: 700 9px/1.3 var(--mono);
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -4644,7 +5200,7 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   cursor: pointer;
 }
@@ -4685,12 +5241,21 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
   padding: 4px 9px;
   border-radius: 3px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent, #fff);
+  font-weight: 600;
   font: 700 9px/1.3 var(--mono);
   letter-spacing: .08em;
   text-transform: uppercase;
   transform: translateX(-50%);
   pointer-events: none;
+}
+
+/* The characters selected in the box being edited, while focus is in the
+   sidebar (keptSelection.ts), drawn as an inactive selection: over white it
+   is Chromium's own inactive grey (#c8c8c8), and being translucent it keeps
+   light text on a dark slide readable where an opaque grey would not. */
+::highlight(deckwerk-kept-selection) {
+  background-color: rgb(140 140 140 / 0.45);
 }
 
 /* Harper spelling/grammar marks on the box being edited (spellcheck.ts). */
@@ -4703,4 +5268,143 @@ button.ghost:hover:not(:disabled) { color: var(--text); background: transparent;
   text-decoration: underline wavy #3e8ef7;
   text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
+}
+
+/* --- object list --- */
+
+/* A drawer over the canvas, opened from a floating icon in its top-left
+   corner the way the notes open from the bottom-left one. Closed, only the
+   icon shows; it moves aside for the rulers as the notes toggle does. */
+.objects-toggle {
+  position: absolute;
+  z-index: 21;
+  left: 12px;
+  top: 12px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  color: var(--text);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  cursor: pointer;
+}
+.objects-toggle:hover { background: var(--panel-2); }
+.objects-toggle[aria-pressed="true"] { color: var(--accent); }
+.canvas-host.rulers-shown > .objects-toggle { left: calc(20px + 12px); top: calc(20px + 12px); }
+.canvas-host.welcome-mode > .objects-toggle,
+.canvas-host.welcome-mode > .objects-drawer { display: none; }
+
+.objects-drawer {
+  position: absolute;
+  z-index: 20;
+  left: 12px;
+  top: 48px;
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  max-height: calc(100% - 48px - 56px);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 40%);
+}
+.objects-drawer.collapsed { display: none; }
+.canvas-host.notes-open > .objects-drawer { max-height: calc(100% - 48px - 56px - var(--notes-drawer-height, 180px)); }
+.canvas-host.rulers-shown > .objects-drawer { left: calc(20px + 12px); top: calc(20px + 48px); }
+
+.object-list-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 4px;
+}
+.object-list-header .insp-title { flex: 1; margin: 0; }
+.object-list-count { color: var(--muted); font: 10.5px var(--mono); }
+.object-list-hint { margin: 0; padding: 4px 12px 8px; }
+
+.object-list-rows {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 12px;
+  border-top: 1px solid var(--line);
+}
+.object-list-empty { margin: 0; padding: 10px 14px; }
+.object-list-row {
+  flex: none;
+  gap: 8px;
+  height: 46px;
+  padding: 0 14px 0 8px;
+  cursor: grab;
+}
+.object-list-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.object-list-row.locked { color: var(--muted); cursor: default; }
+.object-list-row.locked .object-list-thumb { opacity: 0.5; }
+.object-list-row.dragging { opacity: 0.4; }
+.object-list-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.object-list-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* The object's miniature, drawn by the player like a rail thumbnail. The box
+   matches THUMB_W x THUMB_H in objectList.ts. */
+.object-list-thumb {
+  position: relative;
+  flex: none;
+  overflow: hidden;
+  width: 54px;
+  height: 36px;
+  background: var(--bg);
+  /* Decorative: presses and drags belong to the row. */
+  pointer-events: none;
+}
+.object-list-thumb > .rail-thumb-inner { overflow: hidden; }
+/* The frame's stroke sits over the drawing, which fills the whole box. */
+.object-list-thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.object-list-row.selected .object-list-thumb::after { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* Interface size in the browser editor (uiScale.ts): the chrome is zoomed and
+   the slide canvas is not, so pointer maths on the canvas stay exact. */
+:root[data-ui-zoom] :is(#toolbar, #rail, #side, #status, .ui-menu, .ui-help-popover, .panel-popover,
+  .color-picker-popover, .workflow-dialog, .canvas-host > .zoom-controls, .canvas-host > .notes-toggle,
+  .canvas-host > .objects-toggle, .canvas-host > .objects-drawer) { zoom: var(--ui-zoom); }
+
+/* --- Code blocks on the canvas ----------------------------------------- */
+
+/* Lines picked in a selected block's gutter, for a build on just those lines. */
+.code-line-pick {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  /* Translucent whatever the chrome theme: the picked code must stay readable. */
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  outline: calc(1.5px * var(--inv)) solid var(--accent);
+  outline-offset: 0;
+}
+
+/* Typing into a code block: the textarea's glyphs are the highlighted ones
+   drawn under it, so only its caret and its selection show. */
+.code-edit-input::selection { background: rgb(80 140 255 / 38%); color: transparent; }
+.code-edit-input:focus { outline: none; }
+
+/* The language picker that floats at the top-right corner of a block being
+   edited: the app's own select, at toolbar density, on a solid ground so it
+   reads over any slide. */
+.code-language-select {
+  position: absolute;
+  z-index: 20;
+  max-width: 180px;
+  padding: 3px 22px 3px 8px;
+  font-size: 12px;
+  background-color: var(--panel);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 35%);
 }

@@ -50,10 +50,24 @@ function fitPreview(deck: Deck): void {
  * The readiness wait needs painted frames, and browsers suspend
  * requestAnimationFrame in a background tab — a tab opened behind the editor
  * would otherwise sit at "Rendering slides…" for as long as it stays there. So
- * the wait is bounded: past the deadline the pages are offered anyway, with the
- * caveat stated, rather than the export hanging.
+ * the wait is bounded: once nothing has progressed for this long, the pages
+ * are offered anyway, with the caveat stated, rather than the export hanging.
+ * Each settled video counts as progress, so a long deck is not cut off just
+ * for having many of them.
  */
 const READINESS_TIMEOUT_MS = 20_000;
+
+/** The server cuts each video's still with ffmpeg (`/api/video-still`). */
+const stillUrl = (src: string, time: number): Promise<string> => Promise.resolve(
+  `/api/video-still?${new URLSearchParams({ deck: deckId!, src, t: String(time) }).toString()}`,
+);
+
+/** A synced clip's length, from the server's ffprobe (`/api/probe`). */
+const durationFor = async (src: string): Promise<number | null> => {
+  const response = await fetch(`/api/probe?${new URLSearchParams({ deck: deckId!, src }).toString()}`);
+  if (!response.ok) return null;
+  return ((await response.json()) as { duration?: number | null }).duration ?? null;
+};
 
 function hiddenTabHint(): void {
   if (document.visibilityState === 'visible') return;
@@ -95,10 +109,26 @@ void (async () => {
   printButton.addEventListener('click', () => window.print());
   hiddenTabHint();
 
+  let stalled: (value: boolean) => void = () => {};
+  let stallTimer = 0;
+  const armStallTimer = (): void => {
+    clearTimeout(stallTimer);
+    stallTimer = window.setTimeout(() => stalled(false), READINESS_TIMEOUT_MS);
+  };
+  const onProgress = (done: number, total: number): void => {
+    armStallTimer();
+    if (total > 0 && document.visibilityState === 'visible' && done < total) {
+      status.textContent = `Rendering slides… ${done} of ${total} videos`;
+    }
+  };
   const settled = await Promise.race([
-    waitForPdfDocument(pages).then(() => true),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), READINESS_TIMEOUT_MS)),
+    waitForPdfDocument(pages, { stillFor: stillUrl, durationFor, onProgress }).then(() => true),
+    new Promise<boolean>((resolve) => {
+      stalled = resolve;
+      armStallTimer();
+    }),
   ]);
+  clearTimeout(stallTimer);
   const count = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
   printButton.disabled = false;
   document.documentElement.dataset.ready = settled ? 'true' : 'partial';

@@ -12,6 +12,8 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  *     [--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag>
  *      [--cloudflare-port 5801] [--public-url https://slides.example.com]]
  *     [--view-port 5802 [--view-url https://view.example.com]]
+ *     [--tls-host <tailnet address> --tls-cert <cert.pem> --tls-key <key.pem>
+ *      [--tls-port 9443] [--tailscale-socket <path>]]
  *
  * Every Keynote and PowerPoint upload is kept for --keep-uploads-days (30 by
  * default, 0 turns it off) under <decksRootDir>/.uploads/, so an import that
@@ -22,7 +24,14 @@ import { headlessBrowserProblem } from '../src/cli/compileHtml.js';
  * onto their machine. They then use whichever filesystem-based agent they
  * already have. --no-local-agents turns that onboarding off.
  *
+ * --tls-host/--tls-cert/--tls-key add an HTTPS listener on the tailnet
+ * address, with a certificate from `tailscale cert`, in place of `tailscale
+ * serve`: serve accepts connections in tailscaled's userspace TCP stack,
+ * which over a real round trip moved a tenth of what the tunnel carries. The
+ * certificate is re-read when renewal replaces it.
+ *
  * --access <adminLogin> turns on multi-user access control: identity comes
+ * from tailscaled's `whois` for each connection to the --tls-* listener, or
  * from tailscale serve's Tailscale-User-Login headers (trusted on loopback
  * only — pair the flag with --host 127.0.0.1), decks get public/private/
  * shared permissions — each grant either edit or view-only — in an
@@ -69,6 +78,11 @@ let cloudflarePort = 5801;
 let publicUrl: string | undefined;
 let viewPort: number | null = null;
 let viewUrl: string | undefined;
+let tlsCert: string | null = null;
+let tlsKey: string | null = null;
+let tlsHost: string | null = null;
+let tlsPort = 9443;
+let tailscaleSocket: string | undefined;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') port = Number(args[++i]);
   else if (args[i] === '--host') host = args[++i];
@@ -82,9 +96,15 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--public-url') publicUrl = args[++i];
   else if (args[i] === '--view-port') viewPort = Number(args[++i]);
   else if (args[i] === '--view-url') viewUrl = args[++i];
+  else if (args[i] === '--tls-cert') tlsCert = args[++i];
+  else if (args[i] === '--tls-key') tlsKey = args[++i];
+  else if (args[i] === '--tls-host') tlsHost = args[++i];
+  else if (args[i] === '--tls-port') tlsPort = Number(args[++i]);
+  else if (args[i] === '--tailscale-socket') tailscaleSocket = args[++i];
   else if (!args[i].startsWith('-') && !rootDir) rootDir = args[i];
 }
 const cloudflareRequested = cloudflareTeam !== null || cloudflareAud !== null;
+const tlsFlags = [tlsCert, tlsKey, tlsHost].filter((value) => value !== null).length;
 if (
   !rootDir || Number.isNaN(port) || !(keepUploadsDays >= 0) || (accessAdmin !== null && !accessAdmin?.trim())
   || (cloudflareRequested && (!cloudflareTeam?.trim() || !cloudflareAud?.trim() || !accessAdmin
@@ -93,13 +113,16 @@ if (
   || (viewPort !== null && (!accessAdmin || !Number.isInteger(viewPort) || viewPort <= 0 || viewPort === port
     || (cloudflareRequested && viewPort === cloudflarePort)))
   || (viewUrl !== undefined && (viewPort === null || !/^https:\/\/[^/\s]+\/?$/.test(viewUrl)))
+  || (tlsFlags !== 0 && tlsFlags !== 3) || Number.isNaN(tlsPort)
 ) {
   process.stderr.write(
     'usage: npm run collab -- <decksRootDir> [--port 5800] [--host 0.0.0.0] '
     + '[--no-local-agents] [--agent-name <name>] '
     + '[--access <adminLogin>] [--keep-uploads-days <n>] '
     + '[--cloudflare-team <team>.cloudflareaccess.com --cloudflare-aud <tag> [--cloudflare-port 5801] '
-    + '[--public-url https://slides.example.com]] [--view-port 5802 [--view-url https://view.example.com]]\n'
+    + '[--public-url https://slides.example.com]] [--view-port 5802 [--view-url https://view.example.com]] '
+    + '[--tls-host <tailnet address> --tls-cert <cert.pem> --tls-key <key.pem> [--tls-port 9443] '
+    + '[--tailscale-socket <path>]]\n'
     + (cloudflareRequested ? '  (--cloudflare-team and --cloudflare-aud go together, need --access, '
       + 'and --cloudflare-port must differ from --port)\n' : ''),
   );
@@ -143,6 +166,9 @@ const server = await startCollabServer({
     : undefined,
   viewLinks: viewPort === null ? undefined : { port: viewPort, publicUrl: viewUrl },
   keepUploadsDays,
+  tls: tlsHost && tlsCert && tlsKey
+    ? { host: tlsHost, port: tlsPort, certFile: tlsCert, keyFile: tlsKey, tailscaleSocket }
+    : undefined,
 });
 
 process.stdout.write(`${JSON.stringify({

@@ -64,7 +64,9 @@ jobs:
     name: ${{ matrix.label }}
     needs: version
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # macOS uploads each app to Apple's notary service and waits for the
+    # verdict, which is usually minutes but can queue for much longer.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -115,28 +117,56 @@ jobs:
       - name: Build the Keynote importer
         run: npm run build:importer
 
-      - name: Import Apple signing certificate
+      # The frozen binary is what installed apps run: check it reads the
+      # reference deck (every slide, notes included) before shipping it.
+      - name: Check the frozen importer against the reference deck
+        env:
+          KEYNOTE_PACKAGED: '1'
+        run: npx vitest run --config vitest.serial.config.ts test/keynoteImport.test.ts -t "packaged sidecar"
+
+      - name: Check Apple signing credentials
+        id: mac_signing
         if: matrix.platform == 'mac'
         env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-        # electron-builder consumes CSC_LINK itself; this only turns its
-        # absence into a legible message instead of a signing failure 20
-        # minutes later.
-        run: |
-          if [ -z "$CSC_LINK" ]; then
-            echo "::warning::CSC_LINK is unset — producing an UNSIGNED macOS build"
-          fi
-
-      - name: Package
-        env:
-          # Apple. electron-builder signs when CSC_LINK is present and
-          # notarizes when the three APPLE_* values are; the config turns both
-          # off together when they are missing, so a fork still builds.
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
+        # electron-builder imports CSC_LINK into a throwaway keychain itself;
+        # this only decides, up front and legibly, whether this build will be
+        # signed. A release that people download must be: an unsigned app is
+        # one macOS refuses to open, so publishing fails here rather than
+        # shipping one. A dry run without the secrets still builds, unsigned.
+        run: |
+          missing=()
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$PUBLISH" = "true" ]; then
+            echo "::error::Missing secrets ${missing[*]} — refusing to publish an unsigned macOS build (see docs/RELEASING.md §1)"
+            exit 1
+          else
+            echo "::warning::Missing secrets ${missing[*]} — producing an UNSIGNED macOS build"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        env:
+          # Apple. electron-builder signs with CSC_LINK and notarizes with
+          # notarytool using the three APPLE_* values; the config turns both
+          # off together when any is missing, so a fork still builds. Only
+          # the mac legs get them: on Windows electron-builder falls back to
+          # CSC_LINK when WIN_CSC_LINK is unset, and would try to sign the
+          # installer with the Apple certificate.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
           # Azure Trusted Signing. The three credentials are secrets; the three
           # account identifiers are not, and live in repository variables.
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -148,14 +178,64 @@ jobs:
           # Lets electron-builder resolve the GitHub publish config for the
           # latest*.yml update manifests without actually uploading.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:${{ matrix.platform }} -- --${{ matrix.arch }}
+        # Notarizing and stapling talk to Apple's notary and ticket services,
+        # which now and then drop the connection mid-request ("The network
+        # connection was lost", stapler error 68) and fail a build that is
+        # otherwise fine. A mac build that fails is packaged again, up to
+        # three times; any other platform fails at once.
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            npm run dist:${{ matrix.platform }} -- --${{ matrix.arch }} && exit 0
+            if [ "${{ matrix.platform }}" != mac ] || [ "$attempt" -eq 3 ]; then exit 1; fi
+            echo "::warning::Packaging failed (attempt $attempt of 3); retrying in case Apple's services dropped the connection"
+            rm -rf release
+            sleep $((attempt * 30))
+          done
+
+      # The notary service accepting the app is not the end of it: check the
+      # dmg and zip people actually download — signature, Gatekeeper verdict,
+      # stapled ticket, every nested binary — and that the importers, ffmpeg
+      # and Electron still start under the hardened runtime.
+      - name: Verify macOS signature and notarization
+        if: matrix.platform == 'mac' && steps.mac_signing.outputs.signed == 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/verify-mac-release.sh release
+
+      # Update the AppImage this run is about to ship, the way a person
+      # would: repackage the same build as the next patch version into a
+      # folder that is never uploaded, serve it as the update feed, start the
+      # released AppImage under Xvfb, choose Check for Updates…, confirm
+      # Update and Restart Now, and check that the new AppImage replaced
+      # it and relaunched (scripts/smoke-test-appimage-update.mjs). macOS
+      # and Windows updates need signed builds and a person; see
+      # docs/RELEASING.md, "Trying an update end to end".
+      - name: Check the AppImage updates itself
+        if: matrix.platform == 'linux'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libfuse2 xvfb
+          NEXT=$(node -p "const [a, b, c] = process.env.VERSION.split(/[-+]/)[0].split('.').map(Number); [a, b, c + 1].join('.')")
+          npx electron-builder --linux AppImage --x64 --config electron-builder.config.cjs --publish never \
+            -c.extraMetadata.version="$NEXT" -c.directories.output=update-smoke
+          ls -la update-smoke
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            node scripts/smoke-test-appimage-update.mjs release/deckwerk-"$VERSION"-linux-*.AppImage update-smoke
 
       - name: Collect installers
         shell: bash
         # electron-builder also leaves unpacked app trees in release/; only the
         # distributable files, the update manifests and their blockmaps are
-        # worth carrying between jobs. The blockmaps are what let a future
-        # electron-updater download a delta instead of a whole 250 MB app.
+        # worth carrying between jobs. The blockmaps are what let the app's
+        # updater (src/main/updates.ts) download a delta instead of a whole
+        # 250 MB app. Both mac runners write a latest-mac.yml naming only
+        # their own architecture; each is renamed for its arch so the two
+        # survive being downloaded into one folder, and the release job
+        # merges them into the one file electron-updater asks for.
         run: |
           mkdir -p upload
           find release -maxdepth 1 -type f \
@@ -163,6 +243,9 @@ jobs:
                -o -name '*.AppImage' -o -name '*.deb' -o -name '*.tar.gz' \
                -o -name '*.blockmap' -o -name 'latest*.yml' \) \
             -exec cp {} upload/ \;
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            mv upload/latest-mac.yml "upload/latest-mac-${{ matrix.arch }}.yml"
+          fi
           ls -la upload
 
       - uses: actions/upload-artifact@v4
@@ -186,6 +269,21 @@ jobs:
           path: artifacts
           pattern: installers-*
           merge-multiple: true
+
+      # One latest-mac.yml naming both architectures' zips, then a check
+      # that latest.yml, latest-mac.yml and latest-linux.yml are all here
+      # and that every file they list is attached with the sha512 they
+      # claim — so a release can never advertise an update it cannot serve.
+      # Runs on dry runs too: that is where a broken manifest should show.
+      - name: Merge and check the update manifests
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          node scripts/update-manifests.mjs merge-mac \
+            artifacts/latest-mac-x64.yml artifacts/latest-mac-arm64.yml > artifacts/latest-mac.yml
+          rm artifacts/latest-mac-x64.yml artifacts/latest-mac-arm64.yml
+          cat artifacts/latest-mac.yml
+          node scripts/update-manifests.mjs check artifacts "$VERSION"
 
       - name: Generate checksums
         run: |

@@ -1,5 +1,5 @@
 import { renameRetiredFields } from '@shared/fieldAliases.js';
-import { setMediaVariants } from './mediaVariants.js';
+import { setMediaVariants, setPendingMedia } from './mediaVariants.js';
 import type { AgentOperation } from '@shared/agent.js';
 import { applyOpsLenient } from '@shared/collabApply.js';
 import {
@@ -7,9 +7,11 @@ import {
   COLLAB_PROTOCOL_VERSION,
   ServerMessageSchema,
   type ClientMessage,
+  type ClientRemoteMessage,
   type CursorPosition,
   type PresenceState,
   type ServerDeckMovedMessage,
+  type ServerRemoteMessage,
   type ServerWelcomeMessage,
 } from '@shared/collab.js';
 import type { ChatMessage, ChatRef } from '@shared/chat.js';
@@ -37,6 +39,12 @@ import type { RemoteHistoryOptions } from '../editor/store.js';
  */
 
 const UNDO_LIMIT = 200;
+/**
+ * A socket that has not opened by now is given up and retried. A server
+ * behind a route that dropped (a tailnet link gone) never refuses: without
+ * this the handshake hangs for minutes, and nothing says the session is down.
+ */
+const CONNECT_TIMEOUT_MS = 10_000;
 
 interface UndoEntry {
   label: string;
@@ -58,6 +66,12 @@ export interface CollabBridgeHooks {
   onPeerCursor: (clientId: string, cursor: CursorPosition | null) => void;
   onPeerLeft: (clientId: string) => void;
   onThemeCss: (css: string) => void;
+  /**
+   * The server now names a different variant for these srcs (a streaming
+   * version landed): every URL built from here on asks for it, and surfaces
+   * holding the old URL should move what they can.
+   */
+  onMediaVariants?: (srcs: string[]) => void;
   /** One accepted chat message, including the echo of this client's own. */
   onChat?: (message: ChatMessage) => void;
   onStatus: (text: string) => void;
@@ -96,6 +110,16 @@ export interface CollabBridgeHooks {
    * tell the user that work done while disconnected did not survive.
    */
   onEditsDiscarded?: (count: number) => void;
+  /** A message about the remote (remoteControl.ts), from the one peer it is shared with. */
+  onRemote?: (message: ServerRemoteMessage) => void;
+  /** The server refuses this person the deck (close 4003); the bridge has stopped. */
+  onAccessRevoked?: () => void;
+}
+
+/** How this peer introduces itself beyond its name: see PresenceState. */
+export interface CollabSurface {
+  presenting?: boolean;
+  device?: 'phone';
 }
 
 export class CollabBridge {
@@ -110,6 +134,7 @@ export class CollabBridge {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private participant: string | undefined;
+  private surface: CollabSurface = {};
 
   constructor(
     private readonly url: string,
@@ -135,17 +160,34 @@ export class CollabBridge {
     this.participant = participant;
   }
 
+  /** Say what kind of peer this is in the hello. Set before connect(). */
+  setSurface(surface: CollabSurface): void {
+    this.surface = surface;
+  }
+
+  /** Whether the socket is open: the server is reachable, whether or not it has welcomed us yet. */
+  get open(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
   connect(): void {
     this.closed = false;
     const socket = new WebSocket(this.url);
     this.socket = socket;
+    const handshake = setTimeout(() => {
+      if (socket.readyState === WebSocket.CONNECTING) socket.close();
+    }, CONNECT_TIMEOUT_MS);
+    socket.addEventListener('close', () => clearTimeout(handshake));
     socket.addEventListener('open', () => {
+      clearTimeout(handshake);
       this.reconnectDelay = 500;
       this.send({
         kind: 'hello',
         version: COLLAB_PROTOCOL_VERSION,
         name: this.name,
         ...(this.participant ? { participant: this.participant } : {}),
+        ...(this.surface.presenting ? { presenting: true } : {}),
+        ...(this.surface.device ? { device: this.surface.device } : {}),
       });
     });
     socket.addEventListener('message', (event) => {
@@ -166,6 +208,7 @@ export class CollabBridge {
         const reason = event.reason || 'You no longer have access to this presentation';
         this.hooks.onStatus(reason);
         this.hooks.onRefused?.(reason);
+        this.hooks.onAccessRevoked?.();
         return;
       }
       // A deck that is not there (or was renamed: that close follows a
@@ -309,6 +352,11 @@ export class CollabBridge {
     return true;
   }
 
+  /** Relay a remote message; dropped while disconnected, like presence. */
+  sendRemote(message: ClientRemoteMessage): void {
+    this.send(message);
+  }
+
   private seq = 0;
 
   private applyHistoryOps(currentDeck: Deck, ops: AgentOperation[], label: string): void {
@@ -342,7 +390,11 @@ export class CollabBridge {
     const message = ServerMessageSchema.parse(renameRetiredFields(raw));
     switch (message.kind) {
       case 'welcome': {
-        setMediaVariants(message.mediaVariants, true);
+        const changedMedia = [...new Set([
+          ...setMediaVariants(message.mediaVariants, true),
+          ...setPendingMedia(message.pendingMedia ?? []),
+        ])];
+        if (changedMedia.length > 0) this.hooks.onMediaVariants?.(changedMedia);
         this.clientId = message.clientId;
         this.seq = message.seq;
         this.shadow = message.deck;
@@ -434,11 +486,20 @@ export class CollabBridge {
       case 'theme':
         this.hooks.onThemeCss(message.css);
         return;
-      case 'media':
-        setMediaVariants(message.variants);
+      case 'media': {
+        const changed = [...new Set([...setMediaVariants(message.variants), ...setPendingMedia(message.pending)])];
+        if (changed.length > 0) this.hooks.onMediaVariants?.(changed);
         return;
+      }
       case 'chat':
         this.hooks.onChat?.(message.message);
+        return;
+      case 'remote-offer':
+      case 'remote-answer':
+      case 'remote-command':
+      case 'remote-state':
+      case 'remote-end':
+        this.hooks.onRemote?.(message);
         return;
       case 'ended':
         // Deliberate teardown, not a network blip: don't reconnect.

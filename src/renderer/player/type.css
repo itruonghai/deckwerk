@@ -82,6 +82,15 @@
   font: 500 20px/1.3 ui-monospace, monospace;
 }
 
+/* @authoring-lists begin
+ *
+ * Everything from here to the matching end marker is how a list draws, and
+ * the HTML authoring page applies the very same rules to the bare lists an
+ * author writes (`authoringListCss` in shared/htmlSlides.ts rescopes them):
+ * a list the compile measured without them was baked a dozen pixels short
+ * per item, and drew past its box in the player. Keep list rules inside.
+ */
+
 /* Bulleted lists inside text elements. theme.css can restyle the markers. */
 /* No text-align of its own: a list follows the element's alignment like any
    other block, so centring a bulleted text element actually centres it. */
@@ -202,6 +211,19 @@
   text-indent: -1.4em;
 }
 
+/* An item that only holds an indented list -- the first item of a list,
+   indented, hangs in one -- is not a line of the text: no marker, so no line
+   of its own, and no number, so the item after it is still 1. After the
+   rules above, which an authored list-style-type on the list would reach. */
+.text-body li[data-list-holder] {
+  counter-increment: list-item 0;
+  list-style-type: none;
+}
+.text-body li[data-list-holder]::before,
+.text-body li[data-list-holder]::marker {
+  content: none;
+}
+
 /* Blocks nested in an item (a wrapped paragraph, a sub-list) are not the
    marker line and must not inherit its hanging indent. */
 .text-body li > :is(p, div, ul, ol, table) {
@@ -216,6 +238,18 @@
   padding-left: 1.4em;
 }
 
+/* An indented paragraph outside a list (`data-indent`, the Indent buttons)
+   steps in by the same 1.4em per level. Items indent by nesting instead, so
+   the attribute is ignored on one. */
+.text-body [data-indent="1"]:not(li) { margin-left: 1.4em; }
+.text-body [data-indent="2"]:not(li) { margin-left: 2.8em; }
+.text-body [data-indent="3"]:not(li) { margin-left: 4.2em; }
+.text-body [data-indent="4"]:not(li) { margin-left: 5.6em; }
+.text-body [data-indent="5"]:not(li) { margin-left: 7em; }
+.text-body [data-indent="6"]:not(li) { margin-left: 8.4em; }
+.text-body [data-indent="7"]:not(li) { margin-left: 9.8em; }
+.text-body [data-indent="8"]:not(li) { margin-left: 11.2em; }
+
 /* An authored marker colour is independent of character-level text runs.
    Without this opt-in, markers keep following the list item's colour and
    theme.css can continue to style them normally. The drawn disc takes its
@@ -224,6 +258,7 @@
 .text-body li[data-list-marker-color]::marker {
   color: var(--list-marker-color) !important;
 }
+/* @authoring-lists end */
 
 /* Tables pasted from spreadsheets and web pages remain ordinary editable
    HTML. These restrained defaults make unstyled tables readable while inline

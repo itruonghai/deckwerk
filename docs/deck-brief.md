@@ -9,7 +9,7 @@ into editable slide objects. Don't read or edit `deck.json`.
 ## 1. Look at the slides around yours
 
     slide-agent render . --slide 8,9,10 --output /tmp/ctx     # PNGs
-    slide-agent inspect . --html-body --slide 8,9,10          # their markup
+    slide-agent inspect . --html-body --slide 8-10            # same slides, as a range
 
 Slides are numbered as in the editor's rail. Match the neighbours' fonts,
 colours, margins and title position; `theme.css` holds the deck's styles.
@@ -43,9 +43,9 @@ Create `drafts/slide.html` — not in `edit/`, which the editor watches:
     </section>
     </body></html>
 
-Use any HTML and CSS: flex/grid, `<img>`, `object-fit`, `border-radius`,
-`clip-path`, gradients, SVG. Put images in `assets/` (or run
-`slide-agent asset import . <file>`) and refer to them as `assets/<name>`.
+Use any HTML and CSS: flex/grid, `<img>`, `object-fit`, `border-radius`, `clip-path`, gradients, SVG.
+Maths is `$…$` / `$$…$$` (KaTeX); write `<` in it as `&lt;` or `\lt`: a bare `y_{<k}` starts a tag and cuts the text off.
+Put images in `assets/` (or run `slide-agent asset import . <file>`) and refer to them as `assets/<name>`.
 Iterate in a browser, e.g. `chromium --headless --screenshot=/tmp/s.png
 --window-size=1920,1080 drafts/slide.html`. Nothing here involves DeckWerk.
 
@@ -63,8 +63,8 @@ while presenting. If a script lays the page out after load, call `deckwerk.ready
 The first apply stamps `data-slide-id` into your file; applying it again
 replaces that slide, so start each *new* slide from a fresh file. To **replace an existing slide** with your page, copy
 its id (from `inspect --html-body`) onto your `<section>` before applying.
-To delete or reorder slides, `slide-agent inspect . --html --slide 8,9 >
-edit/work.html`, then remove or reorder the `<section>`s there and save.
+To delete or reorder slides, `slide-agent inspect . --html --slide 8,9 > edit/work.html`, then remove or reorder the `<section>`s there and save (reordering only trades the exported slides' places; a new section lands after the previous section's slide).
+A section carries `data-skipped`, `<aside class="notes">` and, when needed, its timeline as JSON in `<script type="application/deckwerk-timeline">` (`data-build-order="2"` makes an appearance the 2nd build), so a copy without `data-slide-id` keeps them.
 
 Check `changes` in apply's output: a `deleted` entry you did not intend
 means stop and undo in the editor; on a hosted deck, `slide-agent history . --deleted` lists who deleted what, in full.

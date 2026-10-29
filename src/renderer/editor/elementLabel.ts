@@ -1,4 +1,5 @@
 import type { SlideElement } from '../../shared/deck';
+import { capOf, isClosedOutline, isLineFamily } from '../../shared/lineFamily.js';
 
 /**
  * Human names for objects in the build and Morph lists. A slide can hold a
@@ -106,6 +107,18 @@ export function elementSwatches(el: SlideElement): Array<{ color: string; kind: 
   return out;
 }
 
+/**
+ * What kind of object a list row stands for, for its glyph: tables and lists
+ * are told apart from plain text, shapes by their geometry.
+ */
+export function elementKind(el: SlideElement): string {
+  if (el.type === 'text') {
+    if (el.table || /<table\b/i.test(el.html)) return 'table';
+    return /<(ul|ol)\b/i.test(el.html) ? 'list' : 'text';
+  }
+  return el.type === 'shape' ? `shape-${el.shape}` : el.type;
+}
+
 export function describeElement(el: SlideElement): string {
   switch (el.type) {
     case 'text': {
@@ -119,8 +132,18 @@ export function describeElement(el: SlideElement): string {
       return `${el.type}: ${el.src.split('/').pop()}`;
     case 'web':
       return `web page: ${el.title || el.src.split('/').pop()}`;
+    case 'code': {
+      const first = el.code.split('\n').find((line) => line.trim())?.trim() ?? '';
+      const short = first.length > 32 ? `${first.slice(0, 31)}…` : first;
+      return short ? `code: ${short}` : 'code';
+    }
     case 'shape': {
-      const name = SHAPE_NAMES[el.shape] ?? el.shape;
+      // Lines are one family: whatever its kind, a line with an arrowhead is
+      // an arrow, and an open path (the pen's, the pencil's) is a line.
+      const arrowed = isLineFamily(el) && (capOf(el, 'start') === 'arrow' || capOf(el, 'end') === 'arrow');
+      const name = arrowed ? 'arrow'
+        : el.shape === 'path' && isLineFamily(el) && !isClosedOutline(el) && !el.fill ? 'line'
+          : SHAPE_NAMES[el.shape] ?? el.shape;
       // A shape's identity on the slide is its outline colour when it is a
       // stroke-only line or arrow, and its fill otherwise.
       const color = colorName(el.fill) ?? colorName(el.stroke);

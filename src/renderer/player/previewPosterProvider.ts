@@ -3,14 +3,15 @@
  *
  * In the desktop app the main process does it with ffmpeg (posterCache.ts)
  * and the renderer never opens a video pipeline for a thumbnail — the reason
- * this seam exists, see that file. The browser collab client has no such
- * helper and keeps capturing frames from a `<video>` in the page.
+ * this seam exists, see that file. In the browser collab client the server
+ * does (`/api/video-still`, through netApi's `videoPoster`).
  *
  * Kept apart from previewPoster.ts so render.ts can ask whether a provider
  * exists without importing the capture code that imports render.ts.
  */
 
-export type PreviewPosterProvider = (resolvedSrc: string, time: number) => Promise<string | null>;
+/** `src` is the clip's deck-relative path where known, else its URL. */
+export type PreviewPosterProvider = (src: string, time: number) => Promise<string | null>;
 
 let provider: PreviewPosterProvider | null = null;
 
@@ -22,7 +23,7 @@ export function previewPosterProvider(): PreviewPosterProvider | null {
   return provider;
 }
 
-/** Deck-relative path from an asset URL, for either asset server. */
+/** Deck-relative path from a deck-relative path or an asset URL, for either asset server. */
 function deckRelativePath(resolvedSrc: string): string | null {
   try {
     const url = new URL(resolvedSrc, document.baseURI);

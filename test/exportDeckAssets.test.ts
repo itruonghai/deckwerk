@@ -2,10 +2,10 @@ import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { emptyDeck } from '../src/shared/deck.js';
 import { createDeck } from '../src/main/deckStore.js';
-import { exportDeck, webExportUnavailableReason } from '../src/main/exportDeck.js';
+import { exportDeck } from '../src/main/exportDeck.js';
 
 /**
  * The web export copies every asset a deck references into the output folder.
@@ -13,8 +13,25 @@ import { exportDeck, webExportUnavailableReason } from '../src/main/exportDeck.j
  * has to honour the same boundary, or a symlink planted in `assets/` walks a
  * private file into a folder that is about to be zipped and handed out.
  */
-describe.skipIf(webExportUnavailableReason() !== null)('web export asset copying', () => {
+describe('web export asset copying', () => {
   const cleanup: string[] = [];
+  // These cases are about what the export copies, not what the player draws,
+  // so a stub stands in for the built player: the suite runs in every
+  // checkout and in CI rather than skipping where `build:export` never ran.
+  const savedPlayer = process.env.DECKWERK_EXPORT_PLAYER_DIR;
+  let player = '';
+
+  beforeAll(async () => {
+    player = await mkdtemp(join(tmpdir(), 'export-assets-player-'));
+    await writeFile(join(player, 'player.js'), '// not loaded\n');
+    process.env.DECKWERK_EXPORT_PLAYER_DIR = player;
+  });
+
+  afterAll(async () => {
+    if (savedPlayer === undefined) delete process.env.DECKWERK_EXPORT_PLAYER_DIR;
+    else process.env.DECKWERK_EXPORT_PLAYER_DIR = savedPlayer;
+    await rm(player, { recursive: true, force: true });
+  });
 
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -43,6 +60,30 @@ describe.skipIf(webExportUnavailableReason() !== null)('web export asset copying
 
     await exportDeck(dir, deck, out);
     expect(existsSync(join(out, 'assets', 'figures', 'plot.png'))).toBe(true);
+  });
+
+  // `slide-agent render` exports a scratch bundle to capture from. It copied
+  // every asset the deck references, each through `<name>.<pid>.copy-tmp`: a
+  // Keynote import that kept a 248-character media name pushed that past the
+  // 255-byte limit, and ENAMETOOLONG failed the render of every slide.
+  it('copies only the named slides\' media, and a name at the length limit', async () => {
+    const long = `assets/${'6874747073'.repeat(24)}-22803.gif`; // a 250-byte file name
+    const { dir, out } = await deckWithImage(long);
+    const deck = JSON.parse(await readFile(join(dir, 'deck.json'), 'utf8'));
+    deck.slides.push({
+      ...deck.slides[0],
+      id: 'other-slide',
+      elements: [{ ...deck.slides[0].elements[0], id: 'img-2', src: 'assets/other.png' }],
+    });
+    await writeFile(join(dir, long), Buffer.from([1, 2, 3]));
+    await writeFile(join(dir, 'assets', 'other.png'), Buffer.from([4, 5, 6]));
+
+    await exportDeck(dir, deck, out, undefined, { onlySlides: new Set([deck.slides[0].id]) });
+    expect(await readFile(join(out, long))).toEqual(Buffer.from([1, 2, 3]));
+    expect(existsSync(join(out, 'assets', 'other.png'))).toBe(false);
+    // Every slide is still in the page: captures address slides by number.
+    expect(await readFile(join(out, 'index.html'), 'utf8')).toContain('other-slide');
+    expect((await readdir(join(out, 'assets'))).filter((name) => name.includes('tmp'))).toEqual([]);
   });
 
   it('refuses a symlink in assets/ that points outside the deck', async () => {

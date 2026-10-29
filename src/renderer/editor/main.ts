@@ -4,6 +4,7 @@ import './editor.css';
 import '../collab/collab.css';
 import '../lightTheme.css';
 import { applyUiTheme } from '../uiTheme.js';
+import { applyUiScale } from '../uiScale.js';
 import { applyAgentOperations, applyAgentTransaction, type AgentOperation } from '@shared/agent.js';
 import type { Deck, SlideElement } from '@shared/deck.js';
 import { emptyDeck } from '@shared/deck.js';
@@ -23,13 +24,17 @@ import {
 import { AgentBridge, type HtmlSyncOutcome } from './agentBridge.js';
 import { AgentPanel } from './agentPanel.js';
 import { createDeckWerkButton } from './aboutDialog.js';
+import { installUpdates } from './updateDialog.js';
 import { trackPreviewFrameRecovery } from '../player/previewFrameRecovery.js';
 import { CANVAS_NOTICE_EVENT, EditorCanvas } from './canvas.js';
 import { CssEditor } from './cssEditor.js';
 import { Inspector } from './inspector.js';
 import { HistoryPanel } from './historyPanel.js';
+import { ObjectList } from './objectList.js';
+import { MediaPanel, installMediaDrop } from './mediaPanel.js';
 import { authoredHtmlSync, fileName } from './htmlCompile.js';
-import { createShapeInsertPicker, createTableInsertPicker, insertText } from './elementCreation.js';
+import { createPenButton, createShapeInsertPicker, createTableInsertPicker, insertText } from './elementCreation.js';
+import { insertCode } from './codeInspector.js';
 import { createLinkMediaButton } from './linkMediaDialog.js';
 import { createToolbarPicker, createToolbarSplitButton } from './exportPicker.js';
 import { showPdfExportDialog } from './pdfExportDialog.js';
@@ -41,8 +46,7 @@ import { persistSessionDeck } from './sessionPersistence.js';
 import { createThemePanel } from './themePanel.js';
 import {
   barButton,
-  barIconButton,
-  TEXT_ICON,
+  createTextInsertPicker,
   bindEditorKeys,
   createClipboardActions,
   makeContextActions,
@@ -50,9 +54,11 @@ import {
   type ShellDeps,
 } from './shellWiring.js';
 import { SlideRail } from './slideRail.js';
+import { createHistoryButton, createMediaButton, popoverPanelHost } from './toolbarPanels.js';
 import { installWindowApiPosterProvider } from '../player/previewPosterProvider.js';
 import { EditorStore } from './store.js';
 import { statusBarText } from './statusBar.js';
+import { BuildPreview } from './buildPreview.js';
 import { TimelinePanel } from './timelinePanel.js';
 import { WelcomeScreen } from './welcomeScreen.js';
 import { CollabBridge } from '../collab/collabBridge.js';
@@ -61,10 +67,15 @@ import { openEndCollaborationPopover } from '../collab/endCollaborationPopover.j
 import { setRenderInvariantChecks } from './renderInvariants.js';
 import { setSelectionInvariantChecks } from './selectionInvariants.js';
 import { SpeakerNotesDrawer } from './speakerNotesDrawer.js';
+import { CanvasRulers, isRulersShortcut, toggleRulers } from './rulers.js';
+import { LightTable } from './lightTable.js';
 import { applySpeakerNotes } from '@shared/speakerNotes.js';
 import { installResponsiveToolbar } from './responsiveToolbar.js';
+import { setSlideColorSource } from './colorPicker.js';
+import { slideColors } from '@shared/slideColors.js';
 
 applyUiTheme();
+applyUiScale();
 
 /**
  * Editor shell: wires the panels to one store, owns the toolbar, the keyboard
@@ -82,6 +93,8 @@ const el = <T extends HTMLElement>(id: string): T => {
 if (navigator.userAgent.includes('Macintosh')) document.body.classList.add('mac-titlebar');
 
 const store = new EditorStore(emptyDeck());
+// The colour picker offers the colours already on the slide being edited.
+setSlideColorSource(() => slideColors(store.slide));
 // Rail and Morph thumbnails take their poster frames from the main process, so
 // this window never opens a video pipeline for a preview (see posterCache.ts).
 installWindowApiPosterProvider();
@@ -147,11 +160,42 @@ new SpeakerNotesDrawer(el('canvas'), store, {
   onInsetChange: (px) => canvas.setBottomInset(px),
   onStatus: setStatusMessage,
 });
+new CanvasRulers(el('canvas'), canvas, store, { shortcutHint: 'Cmd/Ctrl+R' });
+new LightTable(el('canvas'), canvas, store);
+// Cmd/Ctrl+R shows and hides the rulers, as in Keynote, wherever focus is --
+// in the capture phase, because a text box being edited keeps its keys to
+// itself. Taking it also keeps Electron's default menu from reloading the
+// window on it; Cmd/Ctrl+Shift+R still force-reloads.
+window.addEventListener('keydown', (event) => {
+  if (!isRulersShortcut(event)) return;
+  event.preventDefault();
+  if (!event.repeat) toggleRulers();
+}, true);
 const inspector = new Inspector(el('inspector'), store);
-new TimelinePanel(el('timeline'), store);
-new HistoryPanel(el('history'), store);
+new TimelinePanel(el('timeline'), store, new BuildPreview(canvas, store));
+// History is the deck's past, not the selection's: it opens from the deck
+// name in the toolbar rather than from a sidebar tab.
+const historyHost = popoverPanelHost('history');
+new HistoryPanel(historyHost, store);
+// The deck's media library opens from Media on the Insert bar: reusing a file
+// is inserting it, so it sits with Text, Shape and Table rather than in a tab.
+const mediaHost = popoverPanelHost('media');
+const mediaPanel = new MediaPanel(mediaHost, store, {
+  setStatusMessage,
+  beginOperation: (message) => operationProgress.begin(message),
+});
+installMediaDrop(el('canvas'), store, mediaPanel);
 const rail = new SlideRail(el('rail'), store);
 rail.onStatus = setStatusMessage;
+// The slide's objects, from a floating icon in the canvas's top-left corner,
+// as the speaker notes open from the bottom-left one: a drawer over the canvas
+// rather than a column of its own.
+const objectsDrawer = document.createElement('div');
+objectsDrawer.id = 'objects';
+objectsDrawer.className = 'objects-drawer';
+const objectList = new ObjectList(objectsDrawer, store);
+objectList.toggle.classList.add('objects-toggle');
+el('canvas').append(objectList.toggle, objectsDrawer);
 const editorBody = el('body');
 const railDivider = document.createElement('div');
 railDivider.className = 'panel-resize-divider panel-resize-rail';
@@ -352,10 +396,11 @@ function applyHtmlEdit(
             options,
           );
           if (store.get().deck !== deck) continue;
-          // Inline style the browser's parser dropped would otherwise vanish
-          // silently: the page measured without it, yet the apply reads as clean.
+          // Inline style the browser's parser dropped, or maths a `<` cut
+          // short, would otherwise vanish silently: the page measured without
+          // it, yet the apply reads as clean.
           const warned = warnings.length === 0 ? ''
-            : ` — ${warnings.length} style warning${warnings.length === 1 ? '' : 's'}: ${warnings[0]}`;
+            : ` — ${warnings.length} warning${warnings.length === 1 ? '' : 's'}: ${warnings[0]}`;
           const summarise = (message: string, operations: typeof transaction extends null ? never : NonNullable<typeof transaction>['operations'] | []): HtmlSyncOutcome => ({
             stamp: pageStampOf(slides),
             changes: htmlSyncSummary(operations),
@@ -452,6 +497,7 @@ async function placeSyncedSlides(
 
 /* --- toolbar --- */
 
+
 let deckNameLabel: HTMLElement | null = null;
 
 function barDivider(): HTMLElement {
@@ -524,6 +570,7 @@ function buildToolbar(): void {
   left.append(
     createDeckWerkButton(),
     deckNameLabel,
+    createHistoryButton(historyHost),
     barDivider(),
     fileActions,
     compactFile,
@@ -532,10 +579,16 @@ function buildToolbar(): void {
   const mid = document.createElement('div');
   mid.className = 'bar-group deck-only bar-center';
   mid.append(
-    barIconButton('Text', TEXT_ICON, () => addText()),
+    createTextInsertPicker({
+      textBox: () => addText(),
+      // A starter listing, selected, so typing replaces it.
+      codeBlock: () => { canvas.beginCodeEdit(insertCode(store).id, 'all'); },
+    }),
     createShapeInsertPicker(store),
+    createPenButton(canvas),
     createTableInsertPicker(store),
     createLinkMediaButton(store, runOperation),
+    createMediaButton(mediaHost),
   );
 
   const right = document.createElement('div');
@@ -635,6 +688,19 @@ async function exportPdf(): Promise<void> {
     if (result) setStatusMessage(`PDF saved to ${result}`);
   } catch (err) {
     setStatusMessage(`PDF export failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/** "Download original…": the dropped file, copied wherever the author picks. */
+async function saveOriginalAsset(src: string): Promise<void> {
+  try {
+    const saved = await runOperation('Preparing download…', async (operation) => {
+      operation.update('Waiting for a destination');
+      return window.api.saveOriginalAsset(src, operation.id);
+    });
+    if (saved) setStatusMessage(`Saved the original to ${saved}`);
+  } catch (err) {
+    setStatusMessage(`Download failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -975,7 +1041,6 @@ const PANELS = [
   { id: 'inspector', label: 'Props' },
   { id: 'themePanel', label: 'Design' },
   { id: 'timeline', label: 'Build' },
-  { id: 'history', label: 'History' },
 ] as const;
 
 function buildTabs(): void {
@@ -1148,6 +1213,7 @@ const shellDeps: ShellDeps = {
   currentThemeCss: () => cssEditor.getValue(),
   openTrim,
   openRaster,
+  downloadOriginal: { label: 'Download original…', run: (element) => void saveOriginalAsset(element.src) },
   undo: () => {
     if (agentSessionReady && agentSessionBridge) agentSessionBridge.undo(store.get().deck);
     else store.undo();
@@ -1184,6 +1250,26 @@ async function runOperation<T>(
     operation.finish();
   }
 }
+
+/**
+ * Before restarting into an update: write the deck, its theme and its edit
+ * history now, and report whether anything is still unsaved, so the main
+ * process can refuse to quit over it (src/main/updates.ts).
+ */
+async function flushForRestart(): Promise<{ clean: boolean; deckName?: string }> {
+  await cssEditor.flush();
+  const { dir } = store.get();
+  // A window with no deck has nothing to lose.
+  if (!dir) return { clean: true };
+  await save();
+  return { clean: !store.get().dirty, deckName: dir.split(/[\\/]/).pop() || dir };
+}
+
+installUpdates({
+  beginOperation: (message) => operationProgress.begin(message),
+  setStatus: (message) => setStatusMessage(message),
+  flush: flushForRestart,
+});
 
 function setStatusMessage(text: string): void {
   statusMessage = text;
@@ -1291,6 +1377,9 @@ window.api.onRasterDone((result) => {
   setStatusMessage(`Painted image saved as ${result.src}`);
 });
 
+// Ending a presentation returns to the slide it was showing, not the one it
+// started from.
+window.api.onPresentEnded?.((slideIndex) => store.selectSlide(slideIndex));
 
 canvas.contextActions = makeContextActions(shellDeps, clipboard);
 

@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AGENT_PROTOCOL_VERSION,
   AgentTransactionSchema,
   authoredScene,
+  importGaps as importGapsOf,
   type AgentContext,
+  type ImportGap,
   type ComputedSlideScene,
 } from '@shared/agent.js';
 import { deckOutline, deckStyleDigest } from '@shared/deckDigest.js';
@@ -20,6 +21,7 @@ import { CustomThemeSchema, parseDeck, type Comment, type Deck, type Slide, type
 import { commentsOperation, findComment, threadEdits } from '@shared/comments.js';
 import { diffDecks } from '@shared/deckDiff.js';
 import { renameRetiredFields } from '@shared/fieldAliases.js';
+import { rotatedBounds } from '@shared/geometry.js';
 import {
   type ThemeAdoption,
   type ThemePreset,
@@ -54,7 +56,10 @@ import { serveBundle } from './previewServer.js';
 import { exportDeck } from '../main/exportDeck.js';
 import { spawn } from 'node:child_process';
 import { htmlEditTransaction } from '../main/htmlAuthoring.js';
+import { unclosedMath } from '@shared/mathDelimiters.js';
 import { checkWebPage, renderSlidesToPng } from './renderSlides.js';
+import { removeTempDir, tempDir, untilStopped } from './scratch.js';
+import { failureMessage } from '../main/writeFailure.js';
 import { runConnectCommand } from './agentConnect.js';
 import { ChatUsageError, listChat, postChat, resolveChatTarget, waitForMention } from './chatClient.js';
 import { HISTORY_FILE, HISTORY_ROTATED_FILE, parseEditHistory, type EditHistoryEntry } from '@shared/editHistory.js';
@@ -97,13 +102,13 @@ The loop — edit HTML, the editor syncs it back:
   new       [deck] [--count <n>]          a blank authoring page: the same
                                           skeleton, with no slide ids and no
                                           scope, so saving it only ADDS slides
-  inspect   [deck] --html [--selected|--slide id|number|--all]
+  inspect   [deck] --html [--selected|--slide id|number|a-b|--all]
                                           create a scoped authoring page —
                                           editing a section replaces its slide,
                                           removing one deletes it
-  inspect   [deck] --html-body [--slide id|number]
+  inspect   [deck] --html-body [--slide id|number|a-b]
                                           compact read-only section markup
-  inspect   [deck] --elements-only [--slide id|number]
+  inspect   [deck] --elements-only [--slide id|number|a-b]
                                           compact object inventory
   # then edit edit/<file>.html and save it; with the editor open the deck
   # follows within ~200ms. With it closed, apply the same file explicitly:
@@ -126,9 +131,10 @@ Everything else:
   docs [authoring|web|themes|internals]   focused guides; bare docs is the
                                           full repository reference
   capabilities                            every feature, with copyable JSON
-  validate  [deck] [--slide id|number|--selected]
-                                          schema, ids, references, assets, and
-                                          canvas overflows (scoped to your slides)
+  validate  [deck] [--slide id|number|a-b|--selected]
+                                          schema, ids, references, assets, canvas
+                                          overflows and unclosed maths (scoped
+                                          to your slides)
   asset import <deck> <paths...>          copy media into assets/, probed
   web import <deck> <page.html> [--after <slideId>] [--title <text>] [--no-poster]
                                           add one slide showing a complete HTML
@@ -154,7 +160,7 @@ Everything else:
                                           frame will; --replace infers the
                                           existing element's exact box size
   inspect   [deck] [--dom]                computed scenes, for questions
-  render    [deck] [--selected|--slide id|number|--all] --output <dir>
+  render    [deck] [--selected|--slide id|number|a-b|--all] --output <dir>
             [--annotate] [--built]
                                           add --contact-sheet for one tiled
                                           overview of everything rendered
@@ -170,7 +176,7 @@ Everything else:
   theme     choose [deck] --id <themeId>  the deck's current theme: what new
                                           slides are born wearing
   theme     apply  [deck] --id <themeId> [--scope deck|slides]
-            [--slide id|number|--all]
+            [--slide id|number|a-b|--all]
             [--roles title,heading,body,caption,base]
             [--properties fonts,weights,scale,text-color,background,object-colors]
             [--keep-overrides] [--detect-roles]
@@ -219,7 +225,9 @@ save/apply that file. Slides outside its recorded scope stay untouched.
 
 Anywhere a slide is named, --slide takes its id or its 1-based number — the
 number the rail shows and the number 'context' and 'comments' print. So
-"slide 44" is --slide 44, and its neighbours are --slide 43,44,45.
+"slide 44" is --slide 44, and its neighbours are --slide 43,44,45. Where
+several slides can be named (inspect, render, validate, theme apply), a range
+of numbers counts too, and a list can mix them: --slide 2-40, --slide 1,3-5.
 
 Do not hand-compute geometry: write CSS and let the browser measure.
 `;
@@ -281,7 +289,9 @@ export async function runAgentCli(argv: string[], io: CliIo): Promise<number> {
       io.out(json({ status: 'conflict', revision: error.revision, message: error.message }));
       return EXIT_CONFLICT;
     }
-    io.err(error instanceof Error ? error.message : String(error));
+    // A full disk or used-up quota names the file and what to free, rather
+    // than "Unknown system error -122, write" (EDQUOT has no name in Node).
+    io.err(failureMessage(error));
     return error instanceof UsageError ? EXIT_USAGE : EXIT_ERROR;
   }
 }
@@ -664,7 +674,7 @@ async function renderCommand(argv: string[], io: CliIo): Promise<number> {
     return EXIT_ERROR;
   }
 
-  const { images, contactSheet } = await renderSlidesToPng({
+  const { images, contactSheet, contactSheets } = await renderSlidesToPng({
     deckDir,
     deck,
     outDir: resolve(io.cwd, outDir),
@@ -674,7 +684,17 @@ async function renderCommand(argv: string[], io: CliIo): Promise<number> {
     contactSheet: flags.has('contact-sheet'),
     selectedElementIds: context.selectedElementIds,
   });
-  io.out(json({ revision: context.deckRevision, images, contactSheet }));
+  // A PNG that may be missing media says so, here and in the JSON: a
+  // picture that silently lacks its video reads as a slide that has none.
+  for (const image of images) {
+    for (const problem of image.problems ?? []) io.err(`slide ${image.number} (${image.slideId}): ${problem}`);
+  }
+  io.out(json({
+    revision: context.deckRevision,
+    images,
+    contactSheet,
+    ...(contactSheets.length > 1 ? { contactSheets } : {}),
+  }));
   return EXIT_OK;
 }
 
@@ -702,11 +722,10 @@ async function previewCommand(argv: string[], io: CliIo): Promise<number> {
   if (flags.has('open') && process.platform === 'darwin') {
     spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
   }
-  // Serve until killed: the caller owns this process's lifetime.
-  await new Promise<void>((done) => {
-    process.once('SIGINT', done);
-    process.once('SIGTERM', done);
-  });
+  // Serve until killed: the caller owns this process's lifetime. The bundle
+  // is the whole deck's export, media and all, so it goes with the process.
+  await untilStopped();
+  await removeTempDir(bundleDir);
   return EXIT_OK;
 }
 
@@ -734,19 +753,9 @@ async function validateCommand(argv: string[], io: CliIo): Promise<number> {
       if (error instanceof UsageError) throw error;
     }
   }
-  let importGaps: Array<{
-    slideId: string; elementId: string; originalType: string; note: string;
-  }> = [];
+  let importGaps: ImportGap[] = [];
   try {
-    const deck = await loadDeck(deckDir);
-    importGaps = deck.slides.flatMap((slide) => slide.elements
-      .filter((element) => element.type === 'unsupported')
-      .map((element) => ({
-        slideId: slide.id,
-        elementId: element.id,
-        originalType: element.originalType,
-        note: element.note,
-      })));
+    importGaps = importGapsOf(await loadDeck(deckDir));
   } catch {
     // The parse failure is already represented in `errors`.
   }
@@ -759,14 +768,39 @@ async function validateCommand(argv: string[], io: CliIo): Promise<number> {
   try {
     const deck = await loadDeck(deckDir);
     overflows = deck.slides.flatMap((slide) => slide.elements.flatMap((element) => {
+      // The box it covers as drawn: a vertical axis label (rot -90) is
+      // checked as the tall, narrow thing on screen, not its wide stored box.
+      const box = rotatedBounds(element, element.rot);
       const beyond: Record<string, number> = {};
-      if (element.x < 0) beyond.left = round2(-element.x);
-      if (element.y < 0) beyond.top = round2(-element.y);
-      if (element.x + element.w > deck.canvas.w) beyond.right = round2(element.x + element.w - deck.canvas.w);
-      if (element.y + element.h > deck.canvas.h) beyond.bottom = round2(element.y + element.h - deck.canvas.h);
+      if (round2(box.x) < 0) beyond.left = round2(-box.x);
+      if (round2(box.y) < 0) beyond.top = round2(-box.y);
+      if (round2(box.x + box.w) > deck.canvas.w) beyond.right = round2(box.x + box.w - deck.canvas.w);
+      if (round2(box.y + box.h) > deck.canvas.h) beyond.bottom = round2(box.y + box.h - deck.canvas.h);
       return Object.keys(beyond).length > 0
         ? [{ slideId: slide.id, elementId: element.id, type: element.type, beyond }]
         : [];
+    }));
+  } catch {
+    // The parse failure is already represented in `errors`.
+  }
+  // Maths a text element opens and never closes shows on the slide as raw
+  // TeX. The classic cause is a `<` inside `$…$` in an authoring page, which
+  // the HTML parser reads as a tag and cuts the text off at.
+  let mathProblems: Array<{
+    slideId: string; elementId: string; delimiter: string; excerpt: string; message: string;
+  }> = [];
+  try {
+    const deck = await loadDeck(deckDir);
+    mathProblems = deck.slides.flatMap((slide) => slide.elements.flatMap((element) => {
+      const open = element.type === 'text' ? unclosedMath(element.html) : null;
+      return open ? [{
+        slideId: slide.id,
+        elementId: element.id,
+        delimiter: open.delimiter,
+        excerpt: open.excerpt,
+        message: `maths opened with ${open.delimiter} is never closed, so the slide shows it as raw TeX. `
+          + 'If a "<" inside the maths cut it short, write it as &lt; or \\lt.',
+      }] : [];
     }));
   } catch {
     // The parse failure is already represented in `errors`.
@@ -777,6 +811,7 @@ async function validateCommand(argv: string[], io: CliIo): Promise<number> {
       filter({ id: slideId, index: 0, selected: selectedSlideIds.includes(slideId), active: false });
     importGaps = importGaps.filter((gap) => keep(gap.slideId));
     overflows = overflows.filter((overflow) => keep(overflow.slideId));
+    mathProblems = mathProblems.filter((problem) => keep(problem.slideId));
   }
 
   io.out(jsonCompactArrays(
@@ -787,6 +822,7 @@ async function validateCommand(argv: string[], io: CliIo): Promise<number> {
       errors,
       importGaps,
       overflows,
+      mathProblems,
     },
     ['overflows'],
   ));
@@ -894,8 +930,9 @@ async function webCommand(argv: string[], io: CliIo): Promise<number> {
   // bundle or no display simply means no poster.
   let poster: string | null = null;
   if (!flags.has('no-poster')) {
+    let shots: string | null = null;
     try {
-      const shots = await mkdtemp(join(tmpdir(), 'web-poster-'));
+      shots = await tempDir('web-poster-');
       const { images } = await renderSlidesToPng({
         deckDir,
         deck: { ...deck, slides: [slide] },
@@ -915,7 +952,9 @@ async function webCommand(argv: string[], io: CliIo): Promise<number> {
         if (element.type === 'web') element.poster = poster;
       }
     } catch (error) {
-      io.err(`No poster captured (${error instanceof Error ? error.message : String(error)}); the slide still works, previews show an inert frame.`);
+      io.err(`No poster captured (${failureMessage(error)}); the slide still works, previews show an inert frame.`);
+    } finally {
+      if (shots) await removeTempDir(shots);
     }
   }
 
@@ -1183,15 +1222,21 @@ async function webCheckCommand(argv: string[], io: CliIo): Promise<number> {
   if (!size) throw new UsageError(`--size takes WIDTHxHEIGHT, not "${options.get('size')}".`);
   // Checked with the bridge in place, as it will run once imported, so a page
   // that calls `deckwerk.onActive` does not fail here for a missing global.
-  const staged = join(await mkdtemp(join(tmpdir(), 'web-check-')), positional[0].replace(/^.*[\\/]/, ''));
-  await writeFile(staged, injectWebBridgeRuntime(await readFile(pagePath, 'utf8')), 'utf8');
+  const stage = await tempDir('web-check-');
+  const staged = join(stage, positional[0].replace(/^.*[\\/]/, ''));
   const screenshot = options.get('screenshot');
-  const result = await checkWebPage({
-    pagePath: staged,
-    width: Number(size[1]),
-    height: Number(size[2]),
-    screenshot: screenshot ? resolve(io.cwd, screenshot) : null,
-  });
+  let result: Awaited<ReturnType<typeof checkWebPage>>;
+  try {
+    await writeFile(staged, injectWebBridgeRuntime(await readFile(pagePath, 'utf8')), 'utf8');
+    result = await checkWebPage({
+      pagePath: staged,
+      width: Number(size[1]),
+      height: Number(size[2]),
+      screenshot: screenshot ? resolve(io.cwd, screenshot) : null,
+    });
+  } finally {
+    await removeTempDir(stage);
+  }
   io.out(json({
     ...result,
     checked: pagePath,
@@ -1694,7 +1739,7 @@ function ensurePositionals(command: string, positional: string[], max: number): 
 /**
  * What `--slide` named, each flag holding one reference or a comma-separated
  * list. These are ids only once `resolveRequestedSlides` has run over them;
- * before that an entry may still be a slide number.
+ * before that an entry may still be a slide number or a range of them.
  */
 function requestedSlideIds(flags: Set<string>): string[] {
   return [...flags]
@@ -1730,18 +1775,38 @@ function resolveRequestedSlides(flags: Set<string>, deck: Deck): void {
   const refs = requestedSlideIds(flags);
   if (refs.length === 0) return;
   const missing: string[] = [];
-  const resolved = refs.map((ref) => {
-    const id = slideIdForRef(deck, ref);
-    if (id === null) missing.push(ref);
-    return id;
+  const resolved = refs.flatMap((ref) => {
+    const ids = slideIdsForRef(deck, ref);
+    if (ids === null) missing.push(ref);
+    return ids ?? [];
   });
   if (missing.length > 0) {
     throw new UsageError(`No such slide: ${missing.join(', ')}.`
-      + ` This deck has ${deck.slides.length} slides; name one by id or by its 1-based number.`
+      + ` This deck has ${deck.slides.length} slides; name one by id or by its 1-based number,`
+      + ' or a range of numbers from low to high (2-40).'
       + ' Run `slide-agent context` for the current outline.');
   }
   for (const flag of [...flags]) if (flag.startsWith('slide=')) flags.delete(flag);
   for (const id of resolved) flags.add(`slide=${id}`);
+}
+
+/**
+ * The slides one `--slide` entry names: an id, a number, or a range of
+ * numbers (`2-40`, both ends included). Null when any of it is not a slide —
+ * a range reaching past the deck or running backwards is a mistake to
+ * report, not one to clip silently.
+ */
+function slideIdsForRef(deck: Deck, ref: string): string[] | null {
+  const range = /^(\d+)-(\d+)$/.exec(ref);
+  // An id wins over a range, as it does over a number.
+  if (!range || deck.slides.some((slide) => slide.id === ref)) {
+    const id = slideIdForRef(deck, ref);
+    return id === null ? null : [id];
+  }
+  const first = Number(range[1]);
+  const last = Number(range[2]);
+  if (first < 1 || last < first || last > deck.slides.length) return null;
+  return deck.slides.slice(first - 1, last).map((slide) => slide.id);
 }
 
 /** `--selected` (default), `--slide <id>` (repeatable, or comma-separated) or `--all`. */
@@ -2257,7 +2322,3 @@ function parseList(value: string | undefined, allowed: string[], label: string):
   return parts;
 }
 
-/** A scratch directory for the export a render is captured from. */
-export async function tempDir(prefix: string): Promise<string> {
-  return mkdtemp(join(tmpdir(), prefix));
-}

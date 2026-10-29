@@ -1,5 +1,17 @@
-import type { Deck, MediaEffect, Slide, SlideElement } from '@shared/deck.js';
+import { codeTypeSection } from './codeInspector.js';
+import {
+  STROKE_DASHES, STROKE_STYLES, type Deck, type MediaEffect, type ShapeEl, type Slide, type SlideElement, type StrokeDash,
+  type StrokeStyle,
+} from '@shared/deck.js';
 import { braceDepthOf } from '@shared/brace.js';
+import { flipElement, normalizeDegrees, type FlipAxis } from '@shared/flip.js';
+import { drawnAtPixelScale, redrawPathAtSize } from '@shared/pathNodes.js';
+import {
+  STROKE_DASH_GLYPHS, STROKE_DASH_LABELS, STROKE_STYLE_GLYPHS, STROKE_STYLE_LABELS, strokeStyleOf,
+} from '@shared/strokeStyles.js';
+import {
+  LINE_CAPS, capOf, isClosedOutline, isLineFamily, openEnds, setCap, type LineCap, type LineEnd,
+} from '@shared/lineFamily.js';
 import {
   paragraphsToList,
   paragraphsToOrderedList,
@@ -25,6 +37,7 @@ import {
   deckTheme,
   deckThemes,
   followThemeOnText,
+  hasOwnTextType,
   newObjectColors,
   textOverrides,
   themeById,
@@ -33,6 +46,21 @@ import {
 import { ARRANGE_LABELS, arrangeSelection } from './arrange.js';
 import { COLOR_LIVE_END, COLOR_LIVE_START, colorField, colorForInput } from './colorPicker.js';
 import { setCircularMask } from '@shared/mediaMask.js';
+import {
+  DEFAULT_WIPE,
+  syncLengthOf,
+  wipeLayers,
+  wipeOfPair,
+  type CompareMedia,
+  type SyncLength,
+} from '@shared/compare.js';
+import {
+  SYNC_LENGTH_CHOICES,
+  arrangeWipe,
+  clearWipe,
+  setSyncLength,
+  setWipe,
+} from './compareEdits.js';
 import {
   hasTextBox,
   setTextBoxBorder,
@@ -58,7 +86,8 @@ import {
 } from '@shared/shapeShadow.js';
 import { mediaNaturalSize } from './mediaNatural.js';
 import { releaseDecodedVideo } from '../player/decodedVideoPool.js';
-import { angleDial } from './angleDial.js';
+import { LINE_SPACING_MAX, LINE_SPACING_MIN, lineSpacingValue } from '@shared/lineHeight.js';
+import { angleDial, setDialAngle } from './angleDial.js';
 import { isLinkedMediaSrc, videoEmbedFor } from '@shared/linkedMedia.js';
 import { linkedVideoPoster, probeDeadline } from './linkedMediaPoster.js';
 import {
@@ -72,6 +101,7 @@ import {
   setWholeTextAlignment,
   setWholeTextColor,
   setWholeTextFormat,
+  setWholeTextLineHeight,
   setWholeTextParagraphSpacing,
   setWholeTextStyle,
   wholeTextFormatState,
@@ -173,6 +203,10 @@ export class Inspector {
   onApplyTextSelectionParagraphSpacing?: (value: number | null) => boolean;
   /** Authored spacing shared by the paragraphs in the live text selection. */
   textSelectionParagraphSpacing?: () => number | null;
+  /** Set line spacing on only the paragraphs covered by the live text selection. */
+  onApplyTextSelectionLineHeight?: (value: number | null) => boolean;
+  /** Line spacing shared by the paragraphs in the live text selection. */
+  textSelectionLineHeight?: () => number | null;
   onApplyTextSelectionColor?: (value: string | null) => boolean;
   onApplyTextSelectionAlignment?: (value: 'left' | 'center' | 'right' | 'justify') => boolean;
   /** Convert only the paragraphs covered by the live text selection. */
@@ -181,6 +215,8 @@ export class Inspector {
   /** Marker paint for the list items touched by the live text selection. */
   textSelectionMarkerColor?: () => ListMarkerColorState | null;
   onApplyTextSelectionMarkerColor?: (value: string | null) => boolean;
+  /** Indent or outdent the paragraphs and list items the live selection touches. */
+  onShiftTextIndent?: (direction: 'in' | 'out') => boolean;
   tableSelection?: () => TableSelection | null;
   tableBorderSettings?: () => TableBorderSettings;
   onSetTableBorderColor?: (color: string) => void;
@@ -202,6 +238,7 @@ export class Inspector {
     fontWeightExplicit: boolean;
     fittedFontSize: number | null;
     paragraphSpacing: number | null;
+    lineHeight: number | null;
   };
   onInsertTableColumn?: (after: boolean) => void;
   onDeleteTableColumn?: () => void;
@@ -209,6 +246,10 @@ export class Inspector {
   onToggleMask?: (elementId: string) => void;
   /** Which element is currently in mask mode, so the button can reflect it. */
   maskingElement?: () => string | null;
+  /** Start or stop editing a path's points on the canvas. */
+  onTogglePathEdit?: (elementId: string) => void;
+  /** Which path's points are being edited, so the button can reflect it. */
+  pathEditingElement?: () => string | null;
   /** Show the frame at a given time on the canvas while a trim handle moves. */
   onSeekPreview?: (elementId: string, time: number) => void;
   /** Clip length from the canvas video element, when ffprobe cannot say. */
@@ -222,8 +263,10 @@ export class Inspector {
    * loading until they were collected; see `trimSection`.
    */
   private trimPreview: { elementId: string; url: string; video: HTMLVideoElement } | null = null;
-  /** The X/Y/W/H/ROT readouts, refreshed in place during a canvas gesture. */
+  /** The X/Y/W/H/angle readouts, refreshed in place during a canvas gesture. */
   private geometryInputs = new Map<'x' | 'y' | 'w' | 'h' | 'rot', HTMLInputElement>();
+  /** The rotation dial beside the angle readout, refreshed with it. */
+  private rotationDial: HTMLElement | null = null;
   /** What the panel showed last, to skip re-renders that would change nothing. */
   private lastDeck: Deck | null = null;
   private lastSelection = '';
@@ -233,6 +276,9 @@ export class Inspector {
   private continuousEdit = false;
   /** The slide and selection the panel was last built for; see `render`. */
   private lastRenderShown = '';
+  /** A field typed into since it last committed, and a rebuild held for it. */
+  private typingIn: HTMLInputElement | HTMLTextAreaElement | null = null;
+  private renderAfterTyping = false;
   private morphHost = document.createElement('section');
   private morphPanel: MorphPanel;
   /** Enter the dedicated editor for the three fixed layout masters. */
@@ -258,6 +304,31 @@ export class Inspector {
       this.store.endTransaction();
       this.continuousEdit = false;
       this.render();
+    });
+    // A field typed into holds a value nobody has committed. Rebuilding the
+    // panel removes it while it has focus; Chromium blurs it on the way out,
+    // and the blur commits what it holds: a collaborator's edit landing
+    // between the 2 and the 0 of "20" set the font size to 2 (6, clamped),
+    // and the 0 typed into the rebuilt field made it 60. A rebuild waits for
+    // the field to commit or lose focus. Capture phase, so the field's own
+    // commit, which runs next, rebuilds the panel at once as before.
+    this.host.addEventListener('input', (event) => {
+      const target = event.target;
+      if (target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLInputElement && TYPED_INPUT_TYPES.has(target.type))) {
+        this.typingIn = target;
+      }
+    });
+    this.host.addEventListener('change', (event) => {
+      if (event.target === this.typingIn) this.typingIn = null;
+    }, true);
+    this.host.addEventListener('change', () => this.renderHeldForTyping());
+    this.host.addEventListener('focusout', (event) => {
+      if (event.target !== this.typingIn) return;
+      this.typingIn = null;
+      // After focus has landed, so the rebuild hands it back to the control
+      // that took it.
+      setTimeout(() => this.renderHeldForTyping(), 0);
     });
     this.morphHost.className = 'morph-section';
     this.morphPanel = new MorphPanel(this.morphHost, store, false);
@@ -326,6 +397,11 @@ export class Inspector {
   }
 
   render(): void {
+    if (this.typingIn?.isConnected && document.activeElement === this.typingIn) {
+      this.renderAfterTyping = true;
+      return;
+    }
+    this.renderAfterTyping = false;
     // Rebuilding the panel destroys whatever control holds the keyboard. When
     // that control is a form field, Chromium hands focus to the element that
     // owns the document selection — during a text edit, the contenteditable —
@@ -352,6 +428,11 @@ export class Inspector {
     }
     for (const [node, top] of scrolled) node.scrollTop = top;
     this.restoreFocusedControl(focused);
+  }
+
+  /** The rebuild `render` held while a field was being typed into, if any. */
+  private renderHeldForTyping(): void {
+    if (this.renderAfterTyping && !this.typingIn) this.render();
   }
 
   /**
@@ -437,11 +518,16 @@ export class Inspector {
       if (input.value !== text) input.value = text;
       input.placeholder = value === null ? '—' : '';
     }
+    if (this.rotationDial?.isConnected) {
+      const rot = commonValue(selected.map((element) => element.rot));
+      setDialAngle(this.rotationDial, rot === null ? null : rotationToDial(rot));
+    }
   }
 
   private renderPanel(): void {
     const { deck, selection, slideIndex, slideSelection } = this.store.get();
     this.geometryInputs.clear();
+    this.rotationDial = null;
     this.lastDeck = deck;
     this.lastSelection = [...selection].sort().join(',');
     this.lastSlide = slideIndex;
@@ -470,7 +556,12 @@ export class Inspector {
       this.host.appendChild(this.geometrySection(selected));
       const first = selected[0];
       const sameType = selected.every((element) => element.type === first.type);
-      if (
+      if (selected.every(isLineFamily)) {
+        // Lines, arrows, curves and paths are one family, edited alike.
+        const lines = selected as ShapeEl[];
+        if (lines.every((line) => isClosedOutline(line) || line.fill)) this.host.appendChild(this.fillSection(lines));
+        this.host.appendChild(this.strokeSection(lines));
+      } else if (
         first.type === 'shape' &&
         selected.every((element) => element.type === 'shape' && element.shape === first.shape)
       ) {
@@ -927,55 +1018,98 @@ export class Inspector {
     return wrap;
   }
 
-  /** x/y/w/h, plus opacity and rotation. Applies to the whole selection. */
+  /**
+   * Position, size and rotation on rows of their own, as Keynote's Arrange
+   * pane lays them out, then opacity and paint order. The same for every
+   * kind of object, and applied to the whole selection: a field shows the
+   * value the selection shares, or is blank when it is mixed.
+   */
   private geometrySection(selected: SlideElement[]): HTMLElement {
     const geometry = optionSection('Geometry', 'geometry-options');
     geometry.section.classList.add('geometry-section');
     const wrap = geometry.content;
     const first = selected[0];
     const multi = selected.length > 1;
+    const shared = (key: 'x' | 'y' | 'w' | 'h' | 'rot' | 'z'): number | null =>
+      multi ? commonValue(selected.map((element) => element[key])) : first[key];
 
-    const row = document.createElement('div');
-    row.className = 'field-grid';
-    for (const key of ['x', 'y', 'w', 'h'] as const) {
-      const field = numberField(
-        key.toUpperCase(),
-        multi ? commonValue(selected.map((element) => element[key])) : first[key],
-        (v) => {
-          this.store.updateSelected((el) => {
-            if (key === 'w' || key === 'h') el[key] = Math.max(8, v);
-            else {
-              const delta = v - el[key];
-              el[key] = v;
-              if (el.type === 'shape' && el.control) el.control[key] += delta;
-            }
-          });
-        },
-      );
+    const boxField = (key: 'x' | 'y' | 'w' | 'h'): HTMLElement => {
+      const field = numberField(key.toUpperCase(), shared(key), (v) => {
+        this.store.updateSelected((el) => {
+          if (key === 'w' || key === 'h') {
+            const redraw = el.type === 'shape' && drawnAtPixelScale(el)
+              ? { path: el.path!, w: el.w, h: el.h }
+              : null;
+            el[key] = Math.max(8, v);
+            if (redraw && el.type === 'shape') redrawPathAtSize(el, redraw.path, redraw);
+          } else {
+            const delta = v - el[key];
+            el[key] = v;
+            if (el.type === 'shape' && el.control) el.control[key] += delta;
+          }
+        });
+      });
       const input = field.querySelector('input');
       if (input) this.geometryInputs.set(key, input);
-      row.appendChild(field);
+      return field;
+    };
+    wrap.appendChild(geometryRow('Position', boxField('x'), boxField('y')));
+    wrap.appendChild(geometryRow('Size', boxField('w'), boxField('h')));
+
+    // The knob and the number are two faces of one rotation: turning the knob
+    // previews on the canvas as it goes and is one undo step when let go.
+    const rotation = shared('rot');
+    const rotate = (degrees: number): void =>
+      this.store.updateSelected((el) => { el.rot = degrees; }, { label: 'Rotate' });
+    const angleField = numberField('Angle', rotation, rotate, { unit: '°' });
+    const angleInput = angleField.querySelector('input');
+    if (angleInput) this.geometryInputs.set('rot', angleInput);
+    const dial = angleDial(rotation === null ? null : rotationToDial(rotation), {
+      onBegin: () => {
+        this.continuousEdit = true;
+        this.store.beginTransaction('Rotate');
+      },
+      onInput: (degrees) => {
+        const turned = rotationToDial(degrees);
+        if (angleInput) angleInput.value = String(turned);
+        rotate(turned);
+      },
+      onEnd: () => {
+        this.store.endTransaction();
+        this.continuousEdit = false;
+        this.render();
+      },
+    }, 'Rotation');
+    this.rotationDial = dial;
+    const turn = document.createElement('div');
+    turn.className = 'geometry-rotate';
+    turn.append(dial, angleField);
+
+    const flip = document.createElement('div');
+    flip.className = 'field field-flip';
+    const flipLabel = document.createElement('span');
+    flipLabel.textContent = 'Flip';
+    const flips = document.createElement('div');
+    flips.className = 'align-strip flip-strip';
+    for (const [axis, title] of [
+      ['horizontal', 'Flip horizontally'],
+      ['vertical', 'Flip vertically'],
+    ] as Array<[FlipAxis, string]>) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'align-strip-button';
+      b.title = title;
+      b.setAttribute('aria-label', title);
+      b.dataset.flip = axis;
+      b.appendChild(inlineGlyph(FLIP_GLYPHS[axis]));
+      b.addEventListener('click', () =>
+        this.store.updateSelected((el) => flipElement(el, axis), { label: title }));
+      flips.appendChild(b);
     }
-    wrap.appendChild(row);
+    flip.append(flipLabel, flips);
+    wrap.appendChild(geometryRow('Rotate', turn, flip));
 
-    const row2 = document.createElement('div');
-    row2.className = 'field-grid field-grid-2';
-    const rotation = numberField('ROT', multi ? commonValue(selected.map((element) => element.rot)) : first.rot, (v) =>
-      this.store.updateSelected((el) => (el.rot = v)), { unit: '°' },
-    );
-    const rotationInput = rotation.querySelector('input');
-    if (rotationInput) this.geometryInputs.set('rot', rotationInput);
-    row2.appendChild(rotation);
-    row2.appendChild(
-      numberField('Z', multi ? commonValue(selected.map((element) => element.z)) : first.z, (v) =>
-        this.store.updateSelected((el) => (el.z = Math.round(v))),
-      ),
-    );
-    wrap.appendChild(row2);
-
-    const bottom = document.createElement('div');
-    bottom.className = 'geometry-bottom-row';
-    bottom.appendChild(opacityField(
+    const opacity = opacityField(
       multi ? commonValue(selected.map((element) => element.opacity)) : first.opacity,
       () => {
         this.continuousEdit = true;
@@ -988,7 +1122,13 @@ export class Inspector {
         this.store.endTransaction();
         this.continuousEdit = false;
       },
-    ));
+    );
+    opacity.classList.add('geometry-opacity');
+    wrap.appendChild(geometryRow('Opacity', opacity));
+
+    const depth = numberField('Z', shared('z'), (v) =>
+      this.store.updateSelected((el) => (el.z = Math.round(v))),
+    );
 
     const arrange = document.createElement('div');
     arrange.className = 'field field-arrange';
@@ -1012,8 +1152,7 @@ export class Inspector {
       order.appendChild(b);
     }
     arrange.append(arrangeLabel, order);
-    bottom.appendChild(arrange);
-    wrap.appendChild(bottom);
+    wrap.appendChild(geometryRow('Layer', depth, arrange));
 
     // A title or body box that has drifted off its layout slot has no way
     // back but trial and error; give it one. Shown only for the slot's own box
@@ -1067,19 +1206,122 @@ export class Inspector {
    * A size shorter than the line is wide is kept as typed but drawn at the
    * line's width (`arrowHeadSize`), so thickening the line never buries it.
    */
+  /**
+   * The one Stroke section every line in the family shares — a line, an
+   * arrow, a curve, a path from the pen or the pencil, a polygon's outline:
+   * its colour and width, how it is drawn (pen, brush, pencil, marker),
+   * solid or broken, the cap on each open end, and the way into its points.
+   */
+  private strokeSection(shapes: ShapeEl[]): HTMLElement {
+    const section = optionSection('Stroke', 'shape-stroke-options');
+    const first = shapes[0];
+    const shared = <T,>(read: (shape: ShapeEl) => T): T | null => commonValue(shapes.map(read));
+
+    const paint = document.createElement('div');
+    paint.className = 'compact-field-row';
+    const color = colorField('Color', shared((shape) => shape.stroke) ?? first.stroke, (value) =>
+      this.store.updateSelected((element) => {
+        if (element.type === 'shape') element.stroke = value;
+      }, { label: value ? 'Change stroke colour' : 'Remove stroke' }),
+      { clear: { kind: 'none', label: 'No stroke' } },
+    );
+    color.classList.add('field-color-stacked');
+    paint.appendChild(color);
+    paint.appendChild(numberField('WIDTH', shared((shape) => shape.strokeWidth), (value) =>
+      this.store.updateSelected((element) => {
+        if (element.type === 'shape') element.strokeWidth = Math.max(0, value);
+      }, { label: 'Change stroke width' }), { unit: 'px', step: 0.5 },
+    ));
+    section.content.appendChild(paint);
+
+    const style = shared((shape) => strokeStyleOf(shape));
+    section.content.appendChild(segmentedSelectField(
+      'Style',
+      STROKE_STYLES.map((value) => ({ value, title: STROKE_STYLE_LABELS[value], icon: STROKE_STYLE_GLYPHS[value] })),
+      style ?? '',
+      (value) => this.store.updateSelected((element) => {
+        if (element.type !== 'shape') return;
+        if (value === 'pen') delete element.strokeStyle;
+        else element.strokeStyle = value as StrokeStyle;
+      }, { label: 'Change stroke style' }),
+    ));
+
+    // A brush stroke is an outline filled in: it has no dashes to break.
+    if (style !== 'brush') {
+      section.content.appendChild(segmentedSelectField(
+        'Dash',
+        (['solid', ...STROKE_DASHES] as const).map((value) => ({
+          value, title: STROKE_DASH_LABELS[value], icon: STROKE_DASH_GLYPHS[value],
+        })),
+        shared((shape) => shape.strokeDash ?? 'solid') ?? '',
+        (value) => this.store.updateSelected((element) => {
+          if (element.type !== 'shape') return;
+          if (value === 'solid') delete element.strokeDash;
+          else element.strokeDash = value as StrokeDash;
+        }, { label: 'Change stroke dash' }),
+      ));
+    }
+
+    // Caps go on open ends only: a closed outline has none.
+    const capped = (['start', 'end'] as const).filter((end) => shapes.every((shape) => openEnds(shape)[end]));
+    if (capped.length > 0) {
+      const caps = document.createElement('div');
+      caps.className = 'compact-field-row line-cap-fields';
+      for (const end of capped) {
+        caps.appendChild(segmentedSelectField(
+          end === 'start' ? 'Start' : 'End',
+          LINE_CAPS.map((cap) => ({ value: cap, title: LINE_CAP_LABELS[cap], icon: lineCapGlyph(cap, end) })),
+          shared((shape) => capOf(shape, end)) ?? '',
+          (value) => this.store.updateSelected((element) => {
+            if (element.type === 'shape') setCap(element, end, value as LineCap);
+          }, { label: `${end === 'start' ? 'Start' : 'End'} cap: ${LINE_CAP_LABELS[value as LineCap]}` }),
+        ));
+      }
+      section.content.appendChild(caps);
+      if (shapes.some((shape) => capped.some((end) => capOf(shape, end) !== 'none'))) {
+        section.content.appendChild(this.arrowSizeRow(shapes));
+      }
+    }
+
+    if (shapes.length === 1 && this.onTogglePathEdit) {
+      const editing = this.pathEditingElement?.() === first.id;
+      section.content.appendChild(button(
+        editing ? 'Done editing points' : 'Edit points',
+        () => this.onTogglePathEdit?.(first.id),
+        'panel-action path-edit-toggle',
+      ));
+    }
+    return section.section;
+  }
+
+  /** The inside of a closed path: its colour, or a gradient. */
+  private fillSection(shapes: ShapeEl[]): HTMLElement {
+    const section = optionSection('Fill', 'shape-fill-options');
+    const fill = colorField('Color', commonValue(shapes.map((shape) => shape.fill)) ?? shapes[0].fill, (value) =>
+      this.store.updateSelected((element) => {
+        if (element.type === 'shape') element.fill = value;
+      }),
+      { clear: { kind: 'none', label: 'No fill (transparent)' } },
+    );
+    fill.classList.add('field-color-stacked');
+    section.content.appendChild(fill);
+    section.content.appendChild(this.gradientFields(shapes));
+    return section.section;
+  }
+
   private arrowSizeRow(shapes: Array<Extract<SlideElement, { type: 'shape' }>>): HTMLElement {
     const row = document.createElement('div');
     row.className = 'compact-field-row';
     const authored = commonValue(shapes.map((shape) => shape.arrowSize ?? null));
-    row.appendChild(numberField('HEAD SIZE', authored, (value) =>
+    row.appendChild(numberField('CAP SIZE', authored, (value) =>
       this.store.updateSelected((element) => {
         if (element.type === 'shape') element.arrowSize = Math.max(1, Math.min(1000, value));
-      }, { label: 'Change arrowhead size' }), {
+      }, { label: 'Change cap size' }), {
       unit: 'px',
       placeholder: 'Auto',
       onClear: () => this.store.updateSelected((element) => {
         if (element.type === 'shape') delete element.arrowSize;
-      }, { label: 'Automatic arrowhead size' }),
+      }, { label: 'Automatic cap size' }),
     }));
     return row;
   }
@@ -1395,27 +1637,10 @@ export class Inspector {
     shapes: Array<Extract<SlideElement, { type: 'shape' }>>,
   ): HTMLElement {
     const kind = shapes[0].shape;
-    const label = kind === 'arrow' ? 'Arrow style'
-      : kind === 'line' ? 'Line style'
-        : kind === 'brace' ? 'Brace style' : 'Shape style';
-    const wrap = group(label);
+    const wrap = group(kind === 'brace' ? 'Brace style' : 'Shape style');
 
     if (kind === 'brace') {
       // A brace is shaped by its point handle on the slide; it has no fill.
-    } else if (kind === 'line' || kind === 'arrow') {
-      wrap.appendChild(mixedCheckboxField(
-        'Curved',
-        commonValue(shapes.map((shape) => Boolean(shape.control))),
-        (on) => this.store.updateSelected((element) => {
-          if (element.type !== 'shape') return;
-          element.control = on
-            ? { x: element.x + element.w / 2, y: element.y + element.h / 2 - Math.max(80, element.w / 3) }
-            : null;
-        }),
-      ));
-      if (shapes.some((shape) => shape.arrowStart || shape.arrowEnd || shape.shape === 'arrow')) {
-        wrap.appendChild(this.arrowSizeRow(shapes));
-      }
     } else {
       wrap.appendChild(colorField(
         'Fill',
@@ -1673,6 +1898,23 @@ export class Inspector {
     );
     if (spacings.mixed) spacingField.querySelector('input')!.placeholder = 'Mixed';
     wrap.appendChild(spacingField);
+
+    const lineHeights = sharedValue(texts.map((text) => boxLineSpacing(text)));
+    const themeLineHeights = sharedValue(computedTypography.map((value) => value?.lineHeight ?? null));
+    const lineSpacing = lineSpacingField(
+      lineHeights.mixed ? null : lineHeights.value,
+      (value) => this.store.updateSelected((element) => {
+        if (element.type === 'text') setWholeTextLineHeight(element, value);
+      }, { label: 'Change line spacing' }),
+      () => this.store.updateSelected((element) => {
+        if (element.type === 'text') setWholeTextLineHeight(element, null);
+      }, { label: 'Use theme line spacing' }),
+      !lineHeights.mixed && lineHeights.value === null && !themeLineHeights.mixed
+        ? themeLineHeights.value
+        : null,
+    );
+    if (lineHeights.mixed) lineSpacing.querySelector('input')!.placeholder = 'Mixed';
+    wrap.appendChild(lineSpacing);
     return wrap;
   }
 
@@ -1699,8 +1941,32 @@ export class Inspector {
         ), VIDEO_FLAG_SHORT[key]));
       }
       playback.content.appendChild(flags);
+      // Real next to simulated, before next to after: one clock while presenting.
+      const groups = media.map((element) => (element.type === 'video' ? element.syncGroup ?? null : null));
+      const shared = groups[0] !== null && groups.every((group) => group === groups[0]);
+      const sync = checkboxField('Play in sync', shared, (on) => {
+        const group = `sync-${media[0].id}`;
+        this.store.updateSelected((element) => {
+          if (element.type !== 'video') return;
+          if (on) {
+            element.syncGroup = group;
+          } else {
+            delete element.syncGroup;
+            delete element.syncLength;
+          }
+        });
+      });
+      sync.title = 'While presenting, these videos play, pause and loop together, '
+        + 'each measured from its own in-point';
+      playback.content.appendChild(sync);
+      // A wipe offers the same choice in its own section, below.
+      const elements = this.store.slide?.elements ?? [];
+      if (shared && groups[0] && !wipeOfPair(elements, media.map((element) => element.id))) {
+        playback.content.appendChild(this.syncLengthField(groups[0]));
+      }
       wrap.appendChild(playback.section);
     }
+    if (media.length === 2) wrap.appendChild(this.wipeArrangeSection(media));
     const masking = optionSection('Mask', 'media-masking-options', 'non-destructive');
     const maskSettings = document.createElement('div');
     maskSettings.className = 'media-mask-settings';
@@ -1774,6 +2040,74 @@ export class Inspector {
     return wrap;
   }
 
+  /**
+   * Two pictures selected: stack them as a before/after wipe, or, when they
+   * already are one, the wipe's own controls.
+   */
+  private wipeArrangeSection(media: CompareMedia[]): HTMLElement {
+    const layers = wipeOfPair(this.store.slide?.elements ?? [], media.map((element) => element.id));
+    if (layers) return this.wipeSection(layers.top);
+    const section = optionSection('Compare', 'media-compare-options', 'before / after');
+    const arrange = button('Arrange as wipe', () => {
+      arrangeWipe(this.store, [media[0].id, media[1].id]);
+    }, 'panel-action');
+    arrange.title = media[0].type === 'video'
+      ? 'Stack both videos in one box, playing in sync, split by a divider the presenter can drag'
+      : 'Stack both pictures in one box, split by a divider the presenter can drag';
+    section.content.appendChild(arrange);
+    return section.section;
+  }
+
+  /** The wipe this picture is a layer of, top or beneath, if any. */
+  private wipeControls(el: CompareMedia): HTMLElement | null {
+    const layers = wipeLayers(this.store.slide?.elements ?? [], el);
+    return layers ? this.wipeSection(layers.top) : null;
+  }
+
+  /**
+   * How long sync group `group` runs when its clips differ in length:
+   * Shortest / Hold last / Black (shared/compare.ts `SyncLength`).
+   */
+  private syncLengthField(group: string): HTMLElement {
+    const members = this.store.slide?.elements.filter((element) =>
+      element.type === 'video' && element.syncGroup === group) ?? [];
+    const field = segmentedSelectField(
+      'Length',
+      [...SYNC_LENGTH_CHOICES],
+      syncLengthOf(members),
+      (value) => setSyncLength(this.store, group, value as SyncLength),
+    );
+    field.classList.add('sync-length-field');
+    field.title = 'When the clips differ in length';
+    return field;
+  }
+
+  private wipeSection(top: CompareMedia): HTMLElement {
+    const section = optionSection('Wipe', 'media-compare-options', 'before / after');
+    section.content.appendChild(opacityField(
+      top.wipe ?? DEFAULT_WIPE,
+      () => {
+        this.continuousEdit = true;
+        this.store.beginTransaction('Move wipe divider');
+      },
+      (value) => setWipe(this.store, top.id, value),
+      () => {
+        this.store.endTransaction();
+        this.continuousEdit = false;
+      },
+      'Divider',
+    ));
+    // Two clips: how long the pair runs when one is shorter.
+    const under = wipeLayers(this.store.slide?.elements ?? [], top)?.under;
+    if (top.type === 'video' && top.syncGroup && under?.type === 'video' && under.syncGroup === top.syncGroup) {
+      section.content.appendChild(this.syncLengthField(top.syncGroup));
+    }
+    const off = button('Turn off wipe', () => clearWipe(this.store, top.id), 'panel-action');
+    off.title = 'Show both layers whole again; they stay stacked in place';
+    section.content.appendChild(off);
+    return section.section;
+  }
+
   private typeSection(el: SlideElement): HTMLElement | null {
     switch (el.type) {
       case 'video': {
@@ -1817,7 +2151,28 @@ export class Inspector {
           ));
         }
         playback.content.appendChild(flags);
+        if (el.syncGroup) {
+          const partners = this.store.slide?.elements.filter((other) =>
+            other.id !== el.id && other.type === 'video' && other.syncGroup === el.syncGroup).length ?? 0;
+          const note = document.createElement('div');
+          note.className = 'insp-hint';
+          note.textContent = partners > 0
+            ? `Plays in sync with ${partners} other video${partners === 1 ? '' : 's'}`
+            : 'In a sync group with no other video on this slide';
+          const unsync = button('Unsync', () => this.store.updateSelected((e) => {
+            if (e.type !== 'video') return;
+            delete e.syncGroup;
+            delete e.syncLength;
+          }), 'panel-action');
+          playback.content.append(note, unsync);
+          // A layer of a wipe has the choice in the Wipe section instead.
+          if (partners > 0 && !wipeLayers(this.store.slide?.elements ?? [], el)?.under) {
+            playback.content.appendChild(this.syncLengthField(el.syncGroup));
+          }
+        }
         wrap.appendChild(playback.section);
+        const videoWipe = this.wipeControls(el);
+        if (videoWipe) wrap.appendChild(videoWipe);
 
         // Trim is about time, like playback, so it sits beside it rather than
         // after the mask and border sections.
@@ -1844,6 +2199,8 @@ export class Inspector {
         const wrap = typeSections();
         const linked = isLinkedMediaSrc(el.src);
         if (linked) wrap.appendChild(this.linkedSourceSection(el));
+        const imageWipe = this.wipeControls(el);
+        if (imageWipe) wrap.appendChild(imageWipe);
         wrap.appendChild(this.mediaMaskControls(el.id));
         wrap.appendChild(this.mediaBorderControls());
         wrap.appendChild(this.mediaEffectsControls());
@@ -2022,6 +2379,7 @@ export class Inspector {
             ['bold', 'B', 'Bold (Cmd/Ctrl+B)'],
             ['italic', 'I', 'Italic (Cmd/Ctrl+I)'],
             ['underline', 'U', 'Underline (Cmd/Ctrl+U)'],
+            ['strikethrough', 'S', 'Strikethrough (Cmd/Ctrl+Shift+X)'],
             ['superscript', 'x²', 'Superscript (Cmd/Ctrl+Shift+=)'],
             ['subscript', 'x₂', 'Subscript (Cmd/Ctrl+Shift+-)'],
           ] as const) {
@@ -2119,10 +2477,12 @@ export class Inspector {
         roleSelect.classList.add('text-role');
         typography.content.prepend(roleSelect);
 
-        // One click to drop every customisation (and any pinned copy with it),
-        // so the theme decides all of the box's type again: the "+" comes off.
-        // Always in the same place, idle while there is no "+", like Reset to
-        // layout position under Geometry.
+        // One click to drop every customisation (and any pinned copy or
+        // importer class with it), so the theme decides all of the box's type
+        // again: the "+" comes off. Always in the same place, idle only while
+        // the theme already decides everything, like Reset to layout position
+        // under Geometry. A pinned copy is no "+" -- the author did not choose
+        // it -- but it still keeps the box from looking like the theme.
         {
           const followRow = document.createElement('div');
           followRow.className = 'follow-theme-row';
@@ -2130,10 +2490,10 @@ export class Inspector {
           follow.type = 'button';
           follow.className = 'follow-theme-button';
           follow.textContent = 'Reset to theme';
-          follow.disabled = overridden.length === 0;
+          follow.disabled = !hasOwnTextType(el);
           follow.title = follow.disabled
             ? 'This box has no customisations; the theme decides its type'
-            : 'Remove this box’s customisations so the theme decides its face, size, weight and colour';
+            : 'Remove this box’s own type so the theme decides its face, size, weight and colour';
           const id = el.id;
           const previewFollow = () => {
             if (follow.disabled) return;
@@ -2218,6 +2578,44 @@ export class Inspector {
             },
           ));
           listRow.lastElementChild?.classList.add('field-color-stacked');
+        }
+
+        // Indent acts on lines, so like superscript it needs a caret: a list
+        // item moves a level (as Tab does), any other paragraph steps in.
+        {
+          const editing = this.editingText?.() ?? false;
+          const table = /<table\b/i.test(el.html);
+          const indentRow = document.createElement('div');
+          indentRow.className = 'text-list-row text-indent-row';
+          const indent = document.createElement('div');
+          indent.className = 'field text-indent';
+          const indentLabel = document.createElement('span');
+          indentLabel.textContent = 'Indent';
+          const strip = document.createElement('div');
+          strip.className = 'segmented-buttons';
+          strip.setAttribute('role', 'group');
+          for (const [direction, title] of [
+            ['out', 'Outdent (Cmd/Ctrl+[)'],
+            ['in', 'Indent (Cmd/Ctrl+])'],
+          ] as const) {
+            const choice = document.createElement('button');
+            choice.type = 'button';
+            choice.className = 'segment-button';
+            choice.dataset.direction = direction;
+            choice.title = !editing
+              ? `${title} — place the caret in the text first`
+              : table ? 'Indent does not apply to tables' : title;
+            choice.setAttribute('aria-label', title);
+            choice.disabled = !editing || table;
+            choice.appendChild(inlineGlyph(INDENT_GLYPHS[direction]));
+            // Keep the caret: a focus change would end the edit first.
+            choice.addEventListener('pointerdown', (event) => event.preventDefault());
+            choice.addEventListener('click', () => this.onShiftTextIndent?.(direction));
+            strip.appendChild(choice);
+          }
+          indent.append(indentLabel, strip);
+          indentRow.appendChild(indent);
+          layout.content.appendChild(indentRow);
         }
 
         if (/<table\b/i.test(el.html)) {
@@ -2380,12 +2778,37 @@ export class Inspector {
               : null,
           },
         ));
+        // Editing with a selection, the control is the selected paragraphs'
+        // spacing (as Paragraph spacing is); otherwise the box's.
+        const selectedLineHeight = this.textSelectionLineHeight?.() ?? null;
+        const shownLineHeight = selectedLineHeight ?? boxLineSpacing(el);
+        layout.content.appendChild(lineSpacingField(
+          shownLineHeight,
+          (value) => {
+            if (this.onApplyTextSelectionLineHeight?.(value)) return;
+            this.store.updateSelected((e) => {
+              if (e.type === 'text') setWholeTextLineHeight(e, value);
+            }, { label: 'Change line spacing' });
+          },
+          () => {
+            if (this.onApplyTextSelectionLineHeight?.(null)) return;
+            this.store.updateSelected((e) => {
+              if (e.type === 'text') setWholeTextLineHeight(e, null);
+            }, { label: 'Use theme line spacing' });
+          },
+          shownLineHeight === null ? computedTypography?.lineHeight ?? null : null,
+        ));
         wrap.append(typography.section, layout.section, this.textBoxSection(el));
         wrap.appendChild(this.shadowSection([el], 'text'));
         // A box shadow needs a box: it appears once the text has a fill or a border.
         if (hasTextBox(el.style)) wrap.appendChild(this.shadowSection([el], 'box'));
         return wrap;
       }
+
+      case 'code':
+        return codeTypeSection(el, this.store, {
+          typeSections, optionSection, checkboxField, numberField,
+        });
 
       case 'web': {
         const wrap = typeSections();
@@ -2453,19 +2876,23 @@ export class Inspector {
 
       case 'shape': {
         const wrap = typeSections();
+        if (isLineFamily(el)) {
+          // A line, an arrow, a curve, a path: a Stroke section like every
+          // other line's, and a Fill when it closes round an inside.
+          if (isClosedOutline(el) || el.fill) wrap.appendChild(this.fillSection([el]));
+          wrap.appendChild(this.strokeSection([el]));
+          wrap.appendChild(this.shadowSection([el], 'shape'));
+          return wrap;
+        }
         const style = optionSection('Style', 'shape-style-options');
+        // Lines and arrows are the Stroke section's (above): an arrow is a
+        // line with an arrow cap, not a kind of box.
         const kinds: Array<{ value: string; title: string; icon: string }> = [
           { value: 'rect', title: 'Rectangle', icon: SHAPE_KIND_GLYPHS.rect },
           { value: 'ellipse', title: 'Ellipse', icon: SHAPE_KIND_GLYPHS.ellipse },
-          { value: 'line', title: 'Line', icon: SHAPE_KIND_GLYPHS.line },
-          { value: 'arrow', title: 'Arrow', icon: SHAPE_KIND_GLYPHS.arrow },
           { value: 'brace', title: 'Curly brace', icon: SHAPE_KIND_GLYPHS.brace },
         ];
-        // Imported vector art keeps its geometry as a path; it can be shown
-        // but not chosen, since there is no path to switch another kind to.
-        if (el.shape === 'path') {
-          kinds.push({ value: 'path', title: 'Path (drag its corners on the slide)', icon: SHAPE_KIND_GLYPHS.path });
-        }
+        if (el.shape === 'path') kinds.push({ value: 'path', title: 'Path', icon: SHAPE_KIND_GLYPHS.path });
         style.content.appendChild(
           segmentedSelectField('Kind', kinds, el.shape, (v) =>
             this.store.updateSelected((e) => {
@@ -2474,12 +2901,11 @@ export class Inspector {
           ),
         );
         const brace = el.shape === 'brace';
-        const stroked = el.shape === 'line' || el.shape === 'arrow' || brace;
         const paint = document.createElement('div');
         paint.className = 'compact-field-row';
-        // A line has no interior, so Fill and Radius would do nothing; the
+        // A brace has no interior, so Fill and Radius would do nothing; the
         // slot goes to the stroke width instead.
-        if (!stroked) {
+        if (!brace) {
           const fill = colorField('Fill', el.fill, (v) =>
             this.store.updateSelected((e) => {
               if (e.type === 'shape') e.fill = v;
@@ -2502,10 +2928,10 @@ export class Inspector {
             if (e.type === 'shape') e.strokeWidth = Math.max(0, v);
           }), { unit: 'px' },
         );
-        if (stroked) paint.appendChild(width);
+        if (brace) paint.appendChild(width);
         style.content.appendChild(paint);
-        if (!stroked) style.content.appendChild(this.gradientFields([el]));
-        if (!stroked) {
+        if (!brace) {
+          style.content.appendChild(this.gradientFields([el]));
           const nums = document.createElement('div');
           nums.className = 'compact-field-row';
           nums.appendChild(width);
@@ -2517,7 +2943,7 @@ export class Inspector {
             ),
           );
           style.content.appendChild(nums);
-        } else if (brace) {
+        } else {
           const row = document.createElement('div');
           row.className = 'compact-field-row';
           row.appendChild(
@@ -2528,37 +2954,6 @@ export class Inspector {
             ),
           );
           style.content.appendChild(row);
-        } else {
-          const flags = document.createElement('div');
-          flags.className = 'compact-field-row shape-line-flags';
-          flags.appendChild(
-            checkboxField('Curved', Boolean(el.control), (on) =>
-              this.store.updateSelected((e) => {
-                if (e.type !== 'shape') return;
-                e.control = on
-                  ? { x: e.x + e.w / 2, y: e.y + e.h / 2 - Math.max(80, e.w / 3) }
-                  : null;
-              }),
-            ),
-          );
-          flags.appendChild(
-            checkboxField('Head at end', el.arrowEnd, (on) =>
-              this.store.updateSelected((e) => {
-                if (e.type === 'shape') e.arrowEnd = on;
-              }, { label: on ? 'Add arrowhead at end' : 'Remove arrowhead at end' }),
-            ),
-          );
-          flags.appendChild(
-            checkboxField('Head at start', el.arrowStart, (on) =>
-              this.store.updateSelected((e) => {
-                if (e.type === 'shape') e.arrowStart = on;
-              }, { label: on ? 'Add arrowhead at start' : 'Remove arrowhead at start' }),
-            ),
-          );
-          style.content.appendChild(flags);
-          if (el.arrowStart || el.arrowEnd || el.shape === 'arrow') {
-            style.content.appendChild(this.arrowSizeRow([el]));
-          }
         }
         wrap.appendChild(style.section);
         wrap.appendChild(this.shadowSection([el], 'shape'));
@@ -3060,6 +3455,30 @@ function scrolledAncestors(node: HTMLElement): Array<[HTMLElement, number]> {
   return found;
 }
 
+/** Input types an author types a value into, committed on change. */
+const TYPED_INPUT_TYPES = new Set(['text', 'number', 'search', 'url', 'email', 'tel']);
+
+/** One labelled row of the Geometry section: its name, then two cells. */
+function geometryRow(label: string, ...cells: HTMLElement[]): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'geometry-row';
+  row.dataset.row = label.toLowerCase();
+  const name = document.createElement('span');
+  name.className = 'geometry-row-label';
+  name.textContent = label;
+  row.append(name, ...cells);
+  return row;
+}
+
+/**
+ * Element rotation (clockwise degrees) as the angle dial reads it (counter-
+ * clockwise from the right), and back: the dial's hand points where the
+ * object's own right-hand side points on the slide. The map is its own inverse.
+ */
+function rotationToDial(degrees: number): number {
+  return normalizeDegrees(-degrees);
+}
+
 export function numberField(
   label: string,
   value: number | null,
@@ -3115,12 +3534,13 @@ function opacityField(
   onBegin: () => void,
   onInput: (value: number) => void,
   onEnd: () => void,
+  name = 'Opacity',
 ): HTMLElement {
   const wrap = document.createElement('label');
   wrap.className = 'field field-opacity';
 
   const label = document.createElement('span');
-  label.textContent = 'Opacity';
+  label.textContent = name;
 
   const controls = document.createElement('div');
   controls.className = 'field-opacity-controls';
@@ -3130,7 +3550,7 @@ function opacityField(
   input.max = '100';
   input.step = '1';
   input.value = String(value === null ? 50 : Math.round(clamp(value, 0, 1) * 100));
-  input.setAttribute('aria-label', 'Opacity');
+  input.setAttribute('aria-label', name);
 
   const output = document.createElement('output');
   output.textContent = value === null ? 'Mixed' : `${input.value}%`;
@@ -3264,6 +3684,46 @@ function optionalNumberField(
   controls.appendChild(clear);
   wrap.append(span, controls);
   return wrap;
+}
+
+/**
+ * The line spacing a text box declares for itself, as a ratio of its font
+ * size; null when it follows its theme (or declares a length the deck could
+ * not convert, which the computed readout then shows).
+ */
+function boxLineSpacing(element: Extract<SlideElement, { type: 'text' }>): number | null {
+  const value = Number(element.style['line-height'] || Number.NaN);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Line spacing as a multiple of the font size: 1 is set solid, 1.2 is what
+ * most fonts call single. A ratio, never a length, so the lines follow any
+ * change of size (see shared/lineHeight.ts).
+ */
+function lineSpacingField(
+  value: number | null,
+  onChange: (value: number) => void,
+  onClear: () => void,
+  themeValue: number | null,
+): HTMLElement {
+  const field = optionalNumberField(
+    'Line spacing',
+    value,
+    (typed) => onChange(lineSpacingValue(typed)),
+    onClear,
+    '',
+    {
+      min: LINE_SPACING_MIN,
+      max: LINE_SPACING_MAX,
+      step: 0.05,
+      maxFractionDigits: 2,
+      themeValue,
+    },
+  );
+  field.classList.add('text-line-spacing');
+  field.querySelector('input')!.title = 'Multiple of the font size';
+  return field;
 }
 
 function textAreaField(
@@ -3428,6 +3888,12 @@ function inlineGlyph(markup: string): SVGElement {
   return svg;
 }
 
+/** The object (filled) and where a flip puts it (outlined), either side of the dashed axis. */
+const FLIP_GLYPHS: Record<FlipAxis, string> = {
+  horizontal: '<path d="M7 1v12" stroke-dasharray="1.5 1.5"/><path class="fill" d="M1 7l4.5-4.5v9z"/><path d="M13 7L8.5 2.5v9z"/>',
+  vertical: '<path d="M1 7h12" stroke-dasharray="1.5 1.5"/><path class="fill" d="M7 1L2.5 5.5h9z"/><path d="M7 13l-4.5-4.5h9z"/>',
+};
+
 /** Stacking order: the filled square is the selection, the outline the rest. */
 const ARRANGE_GLYPHS = {
   front: '<rect x="1.5" y="5.5" width="7" height="7" rx=".5"/><rect class="fill" x="5.5" y="1.5" width="7" height="7" rx=".5"/>',
@@ -3447,6 +3913,25 @@ const LIST_GLYPHS = {
   Bulleted: '<circle class="fill" cx="3" cy="3.5" r="1.2"/><circle class="fill" cx="3" cy="7" r="1.2"/><circle class="fill" cx="3" cy="10.5" r="1.2"/><path d="M6 3.5h6M6 7h6M6 10.5h6"/>',
   Numbered: '<path class="fill" d="M2.2 2.2h1.2v2.8h-.9V3h-.6zM2 6.3c0-.6.5-1 1.2-1s1.2.4 1.2 1c0 .4-.3.7-.8 1.1l-.5.4h1.3v.7H2v-.6l1.3-1.1c.3-.2.4-.4.4-.5 0-.2-.1-.3-.4-.3-.2 0-.4.1-.4.4zm.1 4.1h.8c0 .2.2.3.4.3s.4-.1.4-.3-.2-.3-.5-.3H3v-.6h.2c.3 0 .4-.1.4-.3s-.1-.3-.3-.3-.4.1-.4.3h-.8c0-.6.5-.9 1.2-.9s1.1.3 1.1.8c0 .3-.2.5-.5.6.3.1.6.3.6.7 0 .5-.5.9-1.2.9s-1.2-.4-1.2-.9z"/><path d="M6 3.5h6M6 7h6M6 10.5h6"/>',
 } as const;
+
+/** Outdent and Indent: the List glyph's three lines and an arrow beside them. */
+const INDENT_GLYPHS = {
+  out: '<path d="M6 3.5h6M6 7h6M6 10.5h6M4 5L2 7l2 2"/>',
+  in: '<path d="M6 3.5h6M6 7h6M6 10.5h6M2 5l2 2-2 2"/>',
+} as const;
+
+const LINE_CAP_LABELS: Record<LineCap, string> = { none: 'None', arrow: 'Arrow', dot: 'Dot', bar: 'Bar' };
+
+/** Each cap on a short line, drawn at the end it is for. */
+function lineCapGlyph(cap: LineCap, end: LineEnd): string {
+  const drawn = {
+    none: '<path d="M2 7h10"/>',
+    arrow: '<path d="M2 7h7"/><path class="fill" d="M12.5 7 8.5 4.2v5.6z"/>',
+    dot: '<path d="M2 7h8"/><circle class="fill" cx="10.5" cy="7" r="2.2"/>',
+    bar: '<path d="M2 7h9.5M11.5 3.5v7"/>',
+  }[cap];
+  return end === 'end' ? drawn : `<g transform="matrix(-1 0 0 1 14 0)">${drawn}</g>`;
+}
 
 const SHAPE_KIND_GLYPHS = {
   rect: '<rect x="2" y="3" width="10" height="8" rx=".5"/>',

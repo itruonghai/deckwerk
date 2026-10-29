@@ -138,6 +138,50 @@ describe('clipboard payload', () => {
     expect(slide.elements[2]).toMatchObject({ src: 'assets/clip.mp4', poster: 'assets/poster.jpg' });
   });
 
+  it('collects and rewrites a web element\'s page and poster like a video\'s', () => {
+    const request: ClipboardWriteRequest = {
+      kind: 'elements',
+      elements: parseDeck({
+        version: 1,
+        slides: [{
+          id: 's',
+          elements: [{
+            id: 'web-1', type: 'web', x: 0, y: 0, w: 400, h: 300,
+            src: 'assets/web/chart.1234abcd.html', poster: 'assets/web/chart.poster.png',
+          }],
+        }],
+      }).slides[0].elements,
+      timeline: [],
+      sourceSlideId: null,
+    };
+    expect(collectAssetSrcs(request)).toEqual(['assets/web/chart.1234abcd.html', 'assets/web/chart.poster.png']);
+    rewriteAssetSrcs(request, new Map([
+      ['assets/web/chart.1234abcd.html', 'assets/web/chart.5678abcd.html'],
+      ['assets/web/chart.poster.png', 'assets/chart.poster.0000abcd.png'],
+    ]));
+    expect(request.elements[0]).toMatchObject({
+      src: 'assets/web/chart.5678abcd.html', poster: 'assets/chart.poster.0000abcd.png',
+    });
+  });
+
+  it('drops what an unmapped src belongs to when asked, and counts it', () => {
+    const deck = sampleDeck();
+    const payload: ClipboardWriteRequest = {
+      kind: 'slides', slides: deck.slides, sourceDeckId: null, sourceThemeStyle: null,
+    };
+    const dropped = rewriteAssetSrcs(payload, new Map([
+      ['assets/clip.mp4', 'assets/clip.abcd1234.mp4'],
+    ]), { dropUnmapped: true });
+    // The background and the poster are references: cleared. The picture
+    // is the element itself: left out, with the build that showed it.
+    expect(dropped).toBe(3);
+    const [slide] = payload.slides;
+    expect(slide.background.image).toBeNull();
+    expect(slide.elements.map((el) => el.id)).toEqual(['text-1', 'video-1']);
+    expect(slide.elements[1]).toMatchObject({ src: 'assets/clip.abcd1234.mp4', poster: null });
+    expect(slide.timeline.map((entry) => entry.id)).toEqual(['t-2']);
+  });
+
   it('remaps timeline refs and nulls refs that point outside the copy', () => {
     const deck = sampleDeck();
     const [slide] = deck.slides;
@@ -264,6 +308,33 @@ describe('cross-instance copy/paste', () => {
     });
 
     expect(dest.get().deck.slides[1].elements[0].style['font-family']).toBeUndefined();
+  });
+
+  it('matching the destination releases imported inline typography', async () => {
+    const sourceDeck = sampleDeck();
+    sourceDeck.themeStyle = themeStyle('Charter, Georgia, serif');
+    const title = sourceDeck.slides[0].elements[0];
+    title.class = ['kn-text', 'role-title'];
+    title.style = {
+      'font-family': '"Avenir-Book", "Avenir", sans-serif',
+      'font-size': '80px',
+      color: '#ffffff',
+    };
+    const source = new EditorStore(sourceDeck, '/src-deck');
+    source.selectSlide(0);
+    await copySlidesToClipboard(source);
+
+    const destDeck = sampleDeck();
+    destDeck.themeStyle = themeStyle('Inter, sans-serif');
+    const dest = new EditorStore(destDeck, '/dest-deck');
+    await pasteFromClipboard(dest, undefined, {
+      chooseSlideTheme: async () => 'destination',
+    });
+
+    const pasted = dest.get().deck.slides[1].elements[0];
+    expect(pasted.class).toEqual(['role-title']);
+    expect(pasted.style).toEqual({ color: '#ffffff' });
+    expect(pasted.type === 'text' && pasted.autoFit).toBe(true);
   });
 
   it('does not interrupt same-theme slide paste', async () => {

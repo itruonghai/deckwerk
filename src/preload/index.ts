@@ -1,10 +1,19 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron';
 import type { Deck } from '@shared/deck.js';
 import type { DeckHistoryDocument } from '@shared/deckHistory.js';
 import type { ClipboardReadResult, ClipboardWriteRequest } from '@shared/clipboard.js';
 import type { ClipboardImageSource } from '@shared/clipboardImages.js';
 import { IPC } from '@shared/ipc.js';
 import { withLinkedMedia } from '@shared/linkedMedia.js';
+import { DECK_ASSET_IPC, type DeckAssetListing, type DeckAssetTrashResult } from '@shared/mediaIndex.js';
+import {
+  UPDATE_IPC,
+  type UpdateCheckResult,
+  type UpdateDownloadResult,
+  type UpdateFlushReply,
+  type UpdateInstallResult,
+  type UpdateState,
+} from '@shared/updates.js';
 import type {
   AgentContextDraft,
   AgentPanelState,
@@ -62,6 +71,10 @@ ipcRenderer.on(IPC.deckKey, (_e, key: string) => {
  * nodeIntegration is off, so this surface is deliberately small and explicit.
  */
 const api = {
+  /** Zoom this window's chrome: DeckWerk menu → Interface size (uiScale.ts). */
+  setUiScale: (factor: number): void => {
+    if (Number.isFinite(factor) && factor > 0) webFrame.setZoomFactor(factor);
+  },
   /** A PNG data URL of this window as it looks now; null if it could not be read. */
   captureWindow: (): Promise<string | null> => ipcRenderer.invoke(IPC.windowCapture),
   /**
@@ -128,11 +141,22 @@ const api = {
   probeAsset: (src: string): Promise<MediaInfo> =>
     ipcRenderer.invoke(IPC.assetProbe, src),
   /**
+   * Save the untouched file behind an image or video src where the author
+   * picks; the saved path, or null when they cancel the panel.
+   */
+  saveOriginalAsset: (src: string, operationId?: string): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.assetSaveOriginal, src, operationId),
+  /**
    * One frame of a deck video as an image URL, cut in the main process, so a
    * thumbnail never has to open a video pipeline in this window.
    */
   videoPoster: (req: VideoPosterRequest): Promise<VideoPosterResult> =>
     ipcRenderer.invoke(IPC.videoPoster, req),
+  /** The Media panel: every file in the deck's assets/ and what refers to it. */
+  listDeckAssets: (): Promise<DeckAssetListing> => ipcRenderer.invoke(DECK_ASSET_IPC.list),
+  /** Move unused asset files to the system Trash, rechecked against `deck` and the saved deck. */
+  trashDeckAssets: (files: string[], deck: Deck): Promise<DeckAssetTrashResult> =>
+    ipcRenderer.invoke(DECK_ASSET_IPC.trash, files, deck),
 
   /**
    * A dropped File carries no usable path once context isolation is on;
@@ -181,6 +205,8 @@ const api = {
     on(IPC.presentCommand, fn),
   onPresentState: (fn: (state: PresentationState) => void): (() => void) =>
     on(IPC.presentState, fn),
+  onPresentEnded: (fn: (slideIndex: number) => void): (() => void) =>
+    on(IPC.presentEnded, fn),
 
   openTrim: (payload: { src: string; elementId: string }): Promise<void> =>
     ipcRenderer.invoke(IPC.trimOpen, payload),
@@ -226,6 +252,35 @@ const api = {
     on(IPC.rasterOpen, fn),
   onRasterDone: (fn: (result: RasterResult) => void): (() => void) =>
     on(IPC.rasterDone, fn),
+
+  /**
+   * Updating the installed app (src/main/updates.ts). Only the desktop app
+   * has this; the browser editor's api leaves it out, and so does its menu.
+   */
+  updates: {
+    state: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.state),
+    check: (): Promise<UpdateCheckResult> => ipcRenderer.invoke(UPDATE_IPC.check),
+    download: (): Promise<UpdateDownloadResult> => ipcRenderer.invoke(UPDATE_IPC.download),
+    install: (): Promise<UpdateInstallResult> => ipcRenderer.invoke(UPDATE_IPC.install),
+    openReleasePage: (version?: string): Promise<void> =>
+      ipcRenderer.invoke(UPDATE_IPC.openReleasePage, version),
+    onProgress: (fn: (ratio: number) => void): (() => void) => on(UPDATE_IPC.progress, fn),
+    /** The native app menu's "Check for Updates…". */
+    onMenuCheck: (fn: () => void): (() => void) => on(UPDATE_IPC.menuCheck, fn),
+    /**
+     * Before restarting into an update, the main process asks every editor
+     * to save; `fn` saves and says whether it is clean now.
+     */
+    onFlushRequest: (fn: () => Promise<{ clean: boolean; deckName?: string }>): (() => void) =>
+      on<string>(UPDATE_IPC.flush, (token) => {
+        void fn()
+          .catch(() => ({ clean: false }))
+          .then((result) => {
+            const reply: UpdateFlushReply = { token, ...result };
+            ipcRenderer.send(UPDATE_IPC.flushed, reply);
+          });
+      }),
+  },
 };
 
 /** Subscribe to a main-process push, returning an unsubscribe function. */

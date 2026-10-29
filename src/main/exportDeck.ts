@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import type { Deck, Slide } from '@shared/deck.js';
 import type { WebExportQuality } from '@shared/ipc.js';
@@ -7,6 +7,7 @@ import { isLinkedMediaSrc } from '@shared/linkedMedia.js';
 import { loadTheme, resolveAsset } from './deckStore.js';
 import { encodeImageWebp, probeImage, probeMedia, transcodeVideoForWeb } from './ffmpeg.js';
 import { copyFileStreamed } from './copyFileStreamed.js';
+import { writeFileNamed } from './writeFailure.js';
 
 /**
  * Export a deck as a self-contained folder that opens in any browser.
@@ -22,8 +23,17 @@ import { copyFileStreamed } from './copyFileStreamed.js';
  * a web host without anyone in the audience noticing.
  */
 
-/** Where the export player bundle lives, in dev and when packaged. */
+/**
+ * Where the export player bundle lives, in dev and when packaged.
+ *
+ * `DECKWERK_EXPORT_PLAYER_DIR` names a built player folder outright: a test
+ * exports with the player it built from this checkout's sources (never
+ * whatever `out/` was last built by hand), or with a stub when the export is
+ * meant to fail before anything loads it.
+ */
 function playerBundleDir(): string {
+  const named = process.env.DECKWERK_EXPORT_PLAYER_DIR;
+  if (named) return named;
   const candidates = [
     join(import.meta.dirname, '../export'),
     join(import.meta.dirname, '../../out/export'),
@@ -56,6 +66,13 @@ export interface WebExportOptions {
    * rail number, which counts skipped ones.
    */
   dropSkipped?: boolean;
+  /**
+   * Copy only the media these slides (by id) show. Every slide stays in the
+   * page, so the player's slide numbers still match the deck's; the others
+   * simply have no files. For `slide-agent render`, which captures a few
+   * slides of a deck that may carry a gigabyte of media.
+   */
+  onlySlides?: ReadonlySet<string>;
   /** Re-encodes running at once. Two keeps libx264 busy without thrashing. */
   concurrency?: number;
 }
@@ -107,7 +124,7 @@ const PROFILES: Record<WebExportQuality, QualityProfile> = {
   },
 };
 
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.mpg', '.mpeg', '.wmv', '.ogv']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.m4v', '.mov', '.qt', '.webm', '.mkv', '.avi', '.mpg', '.mpeg', '.wmv', '.ogv']);
 /** Stills worth re-encoding. GIF and SVG stay as they are: one animates, one has no pixels. */
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.avif']);
 
@@ -128,7 +145,9 @@ export async function exportDeck(
   const exported: Deck = options.dropSkipped
     ? { ...deck, slides: deck.slides.filter((slide) => !slide.skipped) }
     : deck;
-  const wanted = referencedAssets(exported);
+  const wanted = referencedAssets(options.onlySlides
+    ? { ...exported, slides: exported.slides.filter((slide) => options.onlySlides!.has(slide.id)) }
+    : exported);
   // theme.css names files no slide does: a webfont's `@font-face`, a paper
   // texture. It ships as written, so those go across under their own names.
   const theme = await loadTheme(deckDir, deck.theme);
@@ -155,16 +174,25 @@ export async function exportDeck(
   await copyFileStreamed(playerJs, join(outDir, 'player.js'));
   doneWeight += fixedWeight;
 
+  // Code blocks highlight from a second script holding every grammar; a deck
+  // without code does not carry it (vite.export.config.ts).
+  const codeHighlightJs = join(bundleDir, 'code-highlight.js');
+  if (exported.slides.some((slide) => slide.elements.some((element) => element.type === 'code'))
+    && existsSync(codeHighlightJs)) {
+    report('Copying code-highlight.js');
+    await copyFileStreamed(codeHighlightJs, join(outDir, 'code-highlight.js'));
+  }
+
   // The player's structural CSS, then the deck's theme, in that order — the
   // theme must win, exactly as it does in the app.
   const playerCss = join(bundleDir, 'player.css');
   report('Writing player.css');
   const structural = existsSync(playerCss) ? await readFile(playerCss, 'utf8') : '';
-  await writeFile(join(outDir, 'player.css'), structural, 'utf8');
+  await writeFileNamed(join(outDir, 'player.css'), structural, 'utf8');
   doneWeight += fixedWeight;
 
   report(`Writing ${deck.theme}`);
-  await writeFile(join(outDir, 'theme.css'), theme, 'utf8');
+  await writeFileNamed(join(outDir, 'theme.css'), theme, 'utf8');
   doneWeight += fixedWeight;
 
   // The folder exists even when every reference turned out to be unusable, so
@@ -222,8 +250,8 @@ export async function exportDeck(
   const rewritten = renamed.size > 0 || trimmed.size > 0
     ? rewriteAssetReferences(exported, renamed, trimmed)
     : exported;
-  await writeFile(join(outDir, 'index.html'), indexHtml(rewritten), 'utf8');
-  await writeFile(
+  await writeFileNamed(join(outDir, 'index.html'), indexHtml(rewritten), 'utf8');
+  await writeFileNamed(
     join(outDir, 'export.json'),
     JSON.stringify({
       title: deck.title,

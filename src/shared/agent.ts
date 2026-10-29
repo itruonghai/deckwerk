@@ -13,6 +13,7 @@ import { renameRetiredFields } from './fieldAliases.js';
 import { contentOf, keepComments, keepSlideComments, mergeComments, setComments } from './comments.js';
 import { braceDepthOf } from './brace.js';
 import { isLinkedMediaSrc } from './linkedMedia.js';
+import { authoredFlips } from './flip.js';
 
 export const AGENT_PROTOCOL_VERSION = 1 as const;
 
@@ -22,7 +23,9 @@ export const ComputedElementSceneSchema = z.object({
   id: z.string(),
   type: z.string(),
   selected: z.boolean(),
-  authored: RectSchema.extend({ rot: z.number(), z: z.number(), opacity: z.number() }),
+  authored: RectSchema.extend({
+    rot: z.number(), flipX: z.boolean().optional(), flipY: z.boolean().optional(), z: z.number(), opacity: z.number(),
+  }),
   rendered: RectSchema.nullable(),
   computedStyle: z.record(z.string()),
   text: z.object({
@@ -210,7 +213,22 @@ const UpdateCommentsOperation = z.object({
   comments: z.array(CommentSchema),
 });
 
-export const AgentOperationSchema = z.discriminatedUnion('op', [
+/**
+ * `setSlideProperties` names its slide in `slideId`; repeating it as
+ * `slide.id` is allowed but not required. The patch is filled in here, so
+ * every reader past the schema sees the id, and one that names another slide
+ * is still refused where the operation applies.
+ */
+function slidePropertiesIdFromSlideId(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return raw;
+  const operation = raw as { op?: unknown; slideId?: unknown; slide?: unknown };
+  if (operation.op !== 'setSlideProperties' || typeof operation.slideId !== 'string') return raw;
+  if (!operation.slide || typeof operation.slide !== 'object' || Array.isArray(operation.slide)) return raw;
+  if ((operation.slide as { id?: unknown }).id !== undefined) return raw;
+  return { ...operation, slide: { ...operation.slide, id: operation.slideId } };
+}
+
+export const AgentOperationSchema = z.preprocess(slidePropertiesIdFromSlideId, z.discriminatedUnion('op', [
   UpdateCommentsOperation,
   InsertSlidesOperation,
   ReplaceSlideOperation,
@@ -221,7 +239,7 @@ export const AgentOperationSchema = z.discriminatedUnion('op', [
   DeleteElementsOperation,
   UpdateDeckOperation,
   SetSlidePropertiesOperation,
-]);
+]));
 
 export const AgentTransactionSchema = z.object({
   version: z.literal(AGENT_PROTOCOL_VERSION),
@@ -431,6 +449,34 @@ function requireSlideIndex(deck: Deck, id: string): number {
   return index;
 }
 
+/** An object the deck could not hold natively, as `validate` reports it. */
+export interface ImportGap {
+  slideId: string;
+  elementId: string;
+  originalType: string;
+  note: string;
+}
+
+/**
+ * What came into the deck as something other than a native object: an
+ * importer's `unsupported` placeholder, and an HTML region a compile fell back
+ * to (a multi-primitive SVG, a clipped panel) — the object moves and resizes,
+ * but nothing inside it is editable, and an agent should know. A region the
+ * author declared as HTML on purpose is not a gap.
+ */
+export function importGaps(deck: Deck): ImportGap[] {
+  return deck.slides.flatMap((slide) => slide.elements.flatMap((element): ImportGap[] => {
+    if (element.type === 'unsupported') {
+      return [{ slideId: slide.id, elementId: element.id, originalType: element.originalType, note: element.note }];
+    }
+    if (element.type === 'html' && element.fallbackReason
+      && element.fallbackReason !== 'Explicit HTML fallback') {
+      return [{ slideId: slide.id, elementId: element.id, originalType: 'html', note: element.fallbackReason }];
+    }
+    return [];
+  }));
+}
+
 /** Semantic constraints that Zod cannot express locally. */
 export function validateDeckIntegrity(deck: Deck, assetExists?: (src: string) => boolean): string[] {
   const errors: string[] = [];
@@ -506,7 +552,7 @@ function authoredElementScene(element: SlideElement, selected: Set<string>): Com
     selected: selected.has(element.id),
     authored: {
       x: element.x, y: element.y, w: element.w, h: element.h,
-      rot: element.rot, z: element.z, opacity: element.opacity,
+      rot: element.rot, ...authoredFlips(element), z: element.z, opacity: element.opacity,
     },
     rendered: null,
     computedStyle: {},

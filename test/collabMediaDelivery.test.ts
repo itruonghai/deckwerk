@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -101,7 +101,9 @@ describe('media delivery from the collab server', () => {
 
   async function start(slides: unknown[]) {
     await saveDeck(deckDir, parseDeck({ ...emptyDeck('Talk'), slides }));
-    server = await startCollabServer({ rootDir, port: 0, host: '127.0.0.1', mediaRenditions: { cacheDir } });
+    server = await startCollabServer({
+      rootDir, port: 0, host: '127.0.0.1', mediaRenditions: { cacheDir }, printStillCacheDir: join(rootDir, '.print-stills'),
+    });
     return `http://127.0.0.1:${server.port}/decks/${DECK_ID}/assets`;
   }
 
@@ -122,7 +124,7 @@ describe('media delivery from the collab server', () => {
     await before.arrayBuffer();
 
     // The rendition lands while that <video> is still playing.
-    await writeFile(renditionPath(source, info.size, info.mtimeMs, cacheDir), 'RENDITION');
+    await writeFile(renditionPath(pin!.slice(1), cacheDir), 'RENDITION');
 
     // BUG (fixed): a looping clip re-asked for bytes=0- and got the
     // rendition's bytes under the same URL — PIPELINE_ERROR_DECODE in Chromium.
@@ -146,6 +148,28 @@ describe('media delivery from the collab server', () => {
     expect(bare.headers.get('cache-control')).toBe('public, no-cache');
   });
 
+  it('lets browsers cache a small clip instead of refetching it on every loop', async () => {
+    // Oct 2026: clips under the rendition floor had no variant, so clients
+    // pinned a bare `o`, the server said `no-cache`, and Safari downloaded
+    // each looping 1–8 MB clip again on every load — ~10 MB/s for one open tab.
+    await writeFile(join(deckDir, 'assets', 'loop.ed0360bf.mp4'), Buffer.alloc(1024 * 1024, 3));
+    const base = await start([{ id: 's1', elements: [video('v1', 'assets/loop.ed0360bf.mp4')] }]);
+
+    const { socket, welcome } = await welcomeOf(server.port);
+    sockets.push(socket);
+    const pin = welcome.mediaVariants?.['assets/loop.ed0360bf.mp4'];
+    expect(pin).toMatch(/^o[0-9a-f]{24}$/);
+    const pinned = await fetch(`${base}/loop.ed0360bf.mp4?v=${pin}`, { headers: { range: 'bytes=0-1' } });
+    expect(pinned.headers.get('cache-control')).toContain('immutable');
+    await pinned.arrayBuffer();
+
+    // A tab opened before this fix still asks for a bare `o`. The content
+    // hash in the name already fixes the bytes, so that answer is cacheable too.
+    const bare = await fetch(`${base}/loop.ed0360bf.mp4?v=o`, { headers: { range: 'bytes=0-1' } });
+    expect(bare.headers.get('cache-control')).toContain('immutable');
+    await bare.arrayBuffer();
+  });
+
   it.skipIf(!ffmpeg)('tells connected clients when a rendition finishes', async () => {
     // 2 s at ~45 Mbit/s and 2560 wide: oversized on both counts.
     const source = join(deckDir, 'assets', 'screen.mp4');
@@ -160,15 +184,47 @@ describe('media delivery from the collab server', () => {
     const { socket, welcome, next } = await welcomeOf(server.port);
     sockets.push(socket);
     expect(welcome.mediaVariants?.['assets/screen.mp4']).toMatch(/^o/);
+    // Until then it is waiting, so a client that would read the original
+    // only to show a paused frame can show the server's still instead.
+    expect(welcome.pendingMedia).toEqual(['assets/screen.mp4']);
     // Opening the deck queued the transcode; its completion is announced.
     const media = await Promise.race([
       next('media'),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no media message')), 60_000)),
     ]) as Extract<ServerMessage, { kind: 'media' }>;
     expect(media.variants['assets/screen.mp4']).toMatch(/^r/);
+    expect(media.pending).toEqual([]);
     const served = await fetch(`${base}/screen.mp4?v=${media.variants['assets/screen.mp4']}`);
     expect(Number(served.headers.get('content-length'))).toBeLessThan((await stat(source)).size);
   }, 90_000);
+
+  it.skipIf(!ffmpeg)('cuts a video still for the print tab instead of making it load the video', async () => {
+    // Oct 2026: printing a 90-page talk mounted all 61 of its videos at once
+    // and took Chromium past 4 GB and into a media-thread crash. The print
+    // tab now asks for one ffmpeg-cut frame per video.
+    await copyFile(
+      join(__dirname, '..', 'decks', 'demo-deck', 'assets', 'testclip.mp4'),
+      join(deckDir, 'assets', 'clip.mp4'),
+    );
+    await writeFile(join(deckDir, 'assets', 'notes.txt'), 'not a video', 'utf8');
+    await start([{ id: 's1', elements: [video('v1', 'assets/clip.mp4')] }]);
+    const still = (query: Record<string, string>) => fetch(
+      `http://127.0.0.1:${server.port}/api/video-still?${new URLSearchParams({ deck: DECK_ID, ...query })}`,
+    );
+
+    const response = await still({ src: 'assets/clip.mp4', t: '0.5' });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/jpeg');
+    expect(Buffer.from(await response.arrayBuffer()).subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+    // Cached outside the deck, which stays exactly the author's files.
+    expect(await readdir(join(rootDir, '.print-stills'))).toHaveLength(1);
+    expect((await readdir(join(deckDir, 'assets'))).sort()).toEqual(['clip.mp4', 'notes.txt']);
+
+    // The tab falls back to the video itself on anything but a still.
+    expect((await still({ src: 'assets/missing.mp4', t: '0' })).status).toBe(404);
+    expect((await still({ src: 'assets/notes.txt', t: '0' })).status).toBe(400);
+    expect((await still({ src: '../../outside.mp4', t: '0' })).status).toBe(403);
+  }, 60_000);
 
   it('compresses the welcome and the client bundle for slow links', async () => {
     // A deck the size of a real talk's.
@@ -291,6 +347,11 @@ describe('pinning video variants in client URLs', () => {
     expect(pinMediaVariant('assets/talk.mov', '/decks/d/assets/talk.mov')).toBe('/decks/d/assets/talk.mov?v=r0123');
     expect(pinMediaVariant('assets/new.mp4', '/decks/d/assets/new.mp4')).toBe('/decks/d/assets/new.mp4?v=o');
     expect(pinMediaVariant('assets/photo.jpg', '/decks/d/assets/photo.jpg')).toBe('/decks/d/assets/photo.jpg');
+    // A full content key names the clip's one URL on the server, whatever deck holds it.
+    const key = '0123456789abcdef01234567';
+    setMediaVariants({ 'assets/talk.mov': `o${key}`, 'assets/cut.mp4': `r${key}` }, true);
+    expect(pinMediaVariant('assets/talk.mov', '/decks/d/assets/talk.mov')).toBe(`/media/o${key}.mov`);
+    expect(pinMediaVariant('assets/cut.mp4', '/decks/other/assets/cut.mp4')).toBe(`/media/r${key}.mp4`);
     setMediaVariants({}, true);
   });
 });

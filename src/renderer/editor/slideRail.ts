@@ -2,14 +2,14 @@ import { openContextMenu } from './contextMenuPlacement.js';
 import { makeId } from '@shared/geometry.js';
 import { recoverPreviewFrames } from '../player/previewFrameRecovery.js';
 import { freezePreviewVideos, releasePreviewVideos } from '../player/previewPoster.js';
-import { renderSlide } from '../player/render.js';
+import { renderElement, renderSlide, type RenderOptions } from '../player/render.js';
 import { applyDeckThemeToNewSlide } from '@shared/themes.js';
 import { LAYOUT_LABELS_BY_ID } from './layoutPreview.js';
 import { LAYOUT_LABELS, applySlideLayout, type SlideLayout } from './slideLayouts.js';
 import { openComments } from './comments.js';
 import { openThreadCount } from '@shared/comments.js';
 import type { Deck, Slide } from '@shared/deck.js';
-import { sameSlideDrawing, type EditorStore } from './store.js';
+import { changedSlideObjects, sameSlideDrawing, type EditorStore } from './store.js';
 import { showConfirmDialog } from './confirmDialog.js';
 
 /**
@@ -52,15 +52,82 @@ function undoShortcutLabel(): string {
   return /Mac|iPhone|iPad/i.test(platform) ? '⌘Z' : 'Ctrl+Z';
 }
 
+/**
+ * A slide drawn at full canvas size by the player's own renderer, for a
+ * miniature the caller scales down: the rail's thumbnails, and the object
+ * list's, which draw a slide holding one object. Media load a single frame
+ * and freeze into stills; nothing plays.
+ */
+export function previewSurface(slide: Slide, canvas: { w: number; h: number }): HTMLElement {
+  const inner = document.createElement('div');
+  inner.className = 'rail-thumb-inner';
+  inner.style.width = `${canvas.w}px`;
+  inner.style.height = `${canvas.h}px`;
+  if (slide.background.color) inner.style.background = slide.background.color;
+  inner.appendChild(renderSlide(slide, previewRenderOptions()));
+  for (const video of inner.querySelectorAll('video')) {
+    video.removeAttribute('autoplay');
+    // renderSlide's 'metadata' preload decodes exactly one poster frame,
+    // so the thumbnail shows a picture without buffering the clip.
+    video.pause();
+  }
+  // A thumbnail needs one frame, never playback, and a live <video> is
+  // what makes it go black when the page is hidden, occluded or holding
+  // more players than Chromium wants resident. Freeze it into a still.
+  freezePreviewVideos(inner);
+  return inner;
+}
+
+function previewRenderOptions(): RenderOptions {
+  return { resolveSrc: (src) => window.api.assetUrl(src), mediaPreload: 'metadata', deferVideoSrc: true, decodeImagesAsync: true };
+}
+
+/**
+ * How to redraw only the objects of a cached miniature that `slide` changed,
+ * leaving every other node (and its decoded picture) in place; run it to
+ * apply. Null when the change is more than that, or touches a video or a web
+ * page, whose previews are frozen and gated by `previewSurface`: the caller
+ * then builds afresh.
+ */
+function previewPatch(thumb: HTMLElement, previous: Slide, slide: Slide): (() => void) | null {
+  const changed = changedSlideObjects(previous, slide);
+  if (!changed) return null;
+  const before = new Map(previous.elements.map((element) => [element.id, element]));
+  const plain = (type: string) => type !== 'video' && type !== 'web';
+  if (!changed.every((element) => plain(element.type) && plain(before.get(element.id)!.type))) return null;
+  const root = thumb.querySelector<HTMLElement>(':scope > .rail-thumb-inner > [data-slide-id]');
+  if (!root) return null;
+  const drawn = new Map<string, HTMLElement>();
+  for (const node of root.children) {
+    if (node instanceof HTMLElement && node.dataset.elementId) drawn.set(node.dataset.elementId, node);
+  }
+  const nodes = changed.map((element) => drawn.get(element.id));
+  if (nodes.some((node) => !node)) return null;
+  return () => {
+    const options = previewRenderOptions();
+    changed.forEach((element, i) => nodes[i]!.replaceWith(renderElement(element, options)));
+  };
+}
+
 export interface RailPresence {
   name: string;
   color: string;
   selectedElementIds: string[];
 }
 
+export interface SlideRailOptions {
+  /**
+   * A list to look at and pick from, nothing more: no reordering, no context
+   * menu, no slide buttons, no Return-to-add or Delete. The phone client's
+   * rail, where a long press or a drifting thumb must never edit the deck.
+   */
+  readOnly?: boolean;
+}
+
 export class SlideRail {
   private host: HTMLElement;
   private store: EditorStore;
+  private readonly readOnly: boolean;
   /** Keeps cached slide surfaces scaled to the fluid thumbnail frame. */
   private thumbResizeObserver: ResizeObserver | null = null;
   /** Mount full slide DOM only near the scroll viewport. */
@@ -122,9 +189,10 @@ export class SlideRail {
   /** A keyboard deletion waiting on its confirmation dialog. */
   private confirmingDelete = false;
 
-  constructor(host: HTMLElement, store: EditorStore) {
+  constructor(host: HTMLElement, store: EditorStore, options: SlideRailOptions = {}) {
     this.host = host;
     this.store = store;
+    this.readOnly = options.readOnly === true;
     if (typeof ResizeObserver !== 'undefined') {
       this.thumbResizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) this.scaleThumb(entry.target as HTMLElement);
@@ -201,11 +269,65 @@ export class SlideRail {
       this.highlight(slideIndex, slideSelection);
       return;
     }
-    if (deck.slides === this.renderedSlides) {
+    if (deck.slides === this.renderedSlides || this.redrawInPlace(deck)) {
       this.highlight(slideIndex, slideSelection);
       return;
     }
     this.render();
+  }
+
+  /**
+   * Bring the rail up to `deck` without a rebuild when the only slides that
+   * changed are shown rows whose change is their speaker notes, their
+   * comments or a few of their objects: typing syncs one such slide four
+   * times a second. A rebuild redrew that slide's miniature from scratch,
+   * every picture on it included, and re-created the runs of hidden slides
+   * around it, thumbnails and all; on a slide of thirty pictures each sync
+   * cost Chromium a 100-190 ms frame (editingLatencyBrowser.test.ts). False,
+   * having changed nothing, when any changed slide needs more.
+   */
+  private redrawInPlace(deck: Deck): boolean {
+    const before = this.renderedSlides as Slide[] | null;
+    if (!Array.isArray(before) || before.length !== deck.slides.length) return false;
+    const updates: Array<{ previous: Slide; slide: Slide; row: HTMLElement; index: number; patch: (() => void) | null }> = [];
+    for (let index = 0; index < deck.slides.length; index++) {
+      const previous = before[index];
+      const slide = deck.slides[index];
+      if (previous === slide) continue;
+      if (previous.id !== slide.id || slide.skipped || previous.skipped) return false;
+      const cached = this.rowCache.get(previous);
+      if (!cached || cached.index !== index || cached.row.parentElement !== this.host) return false;
+      if (sameSlideDrawing(previous, slide)) {
+        updates.push({ previous, slide, row: cached.row, index, patch: null });
+        continue;
+      }
+      // A row still showing its placeholder draws whatever slide it is handed
+      // when it scrolls near; it only needs the new one.
+      if (cached.row.querySelector(':scope > .rail-thumb-placeholder') && !this.thumbCache.has(previous)) {
+        updates.push({ previous, slide, row: cached.row, index, patch: null });
+        continue;
+      }
+      const thumb = this.thumbCache.get(previous);
+      const patch = thumb && cached.row.contains(thumb) ? previewPatch(thumb, previous, slide) : null;
+      if (!patch) return false;
+      updates.push({ previous, slide, row: cached.row, index, patch });
+    }
+    for (const { previous, slide, row, index, patch } of updates) {
+      patch?.();
+      const thumb = this.thumbCache.get(previous);
+      if (thumb) {
+        this.thumbCache.delete(previous);
+        this.thumbCache.set(slide, thumb);
+      }
+      const shown = row.querySelector<HTMLElement>(':scope > .rail-thumb');
+      if (shown) this.pendingThumbs.set(shown, { deck, slide });
+      this.rowCache.delete(previous);
+      this.rowCache.set(slide, { row, index });
+      this.syncCommentState(row, slide);
+    }
+    this.slideById = new Map(deck.slides.map((slide) => [slide.id, slide]));
+    this.renderedSlides = deck.slides;
+    return true;
   }
 
   private highlight(slideIndex: number, slideSelection: Set<string>): void {
@@ -318,6 +440,10 @@ export class SlideRail {
       i = end + 1;
     }
 
+    if (this.readOnly) {
+      this.patchChildren(children);
+      return;
+    }
     const actions = document.createElement('div');
     actions.className = 'rail-actions';
     actions.append(
@@ -502,25 +628,7 @@ export class SlideRail {
       thumb.className = 'rail-thumb';
       thumb.dataset.canvasWidth = String(deck.canvas.w);
       thumb.style.setProperty('--rail-thumb-aspect', `${deck.canvas.w} / ${deck.canvas.h}`);
-      const inner = document.createElement('div');
-      inner.className = 'rail-thumb-inner';
-      inner.style.width = `${deck.canvas.w}px`;
-      inner.style.height = `${deck.canvas.h}px`;
-      if (slide.background.color) inner.style.background = slide.background.color;
-      inner.appendChild(
-        renderSlide(slide, { resolveSrc: (src) => window.api.assetUrl(src), mediaPreload: 'metadata', deferVideoSrc: true }),
-      );
-      for (const video of inner.querySelectorAll('video')) {
-        video.removeAttribute('autoplay');
-        // renderSlide's 'metadata' preload decodes exactly one poster frame,
-        // so the thumbnail shows a picture without buffering the clip.
-        video.pause();
-      }
-      // A thumbnail needs one frame, never playback, and a live <video> is
-      // what makes it go black when the page is hidden, occluded or holding
-      // more players than Chromium wants resident. Freeze it into a still.
-      freezePreviewVideos(inner);
-      thumb.appendChild(inner);
+      thumb.appendChild(previewSurface(slide, deck.canvas));
       this.scaleThumb(thumb);
       this.thumbResizeObserver?.observe(thumb);
       this.thumbCache.set(slide, thumb);
@@ -680,11 +788,11 @@ export class SlideRail {
       const item = document.createElement('button');
       item.className = `rail-item${slideSelection.has(slide.id) ? ' selected' : ''}${i === slideIndex ? ' active' : ''}${slide.skipped ? ' skipped' : ''}`;
       item.setAttribute('aria-selected', String(slideSelection.has(slide.id)));
-      item.draggable = true;
+      item.draggable = !this.readOnly;
       item.dataset.index = String(i);
       item.dataset.slideId = slide.id;
       this.rowBySlideId.set(slide.id, item);
-      this.bindReorder(item, i);
+      if (!this.readOnly) this.bindReorder(item, i);
 
       const num = document.createElement('span');
       num.className = 'rail-num';
@@ -718,9 +826,17 @@ export class SlideRail {
       // Selection runs on pointerdown, not click: the row is draggable for
       // reorder, and Chromium starts a native drag on a few pixels of drift,
       // which suppresses the click entirely — every real (slightly wobbly)
-      // click on a thumbnail then did nothing.
+      // click on a thumbnail then did nothing. A read-only rail is not
+      // draggable, and is scrolled by a finger that lands on a row first: it
+      // selects on the click a tap makes and a scroll does not.
+      if (this.readOnly) {
+        item.addEventListener('click', () => {
+          this.store.selectSlide(i);
+          this.onSlideActivate?.(i);
+        });
+      }
       item.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || this.readOnly) return;
         // Shift extends a range from the anchor; Cmd/Ctrl picks or drops this
         // one row on its own, so a scattered set of slides can be deleted,
         // hidden or duplicated in one go.
@@ -733,7 +849,7 @@ export class SlideRail {
         // slides then pressing Backspace appears to do nothing at all.
         this.host.focus({ preventScroll: true });
       });
-      item.addEventListener('contextmenu', (event) => this.onContextMenu(event, i));
+      if (!this.readOnly) item.addEventListener('contextmenu', (event) => this.onContextMenu(event, i));
       this.rowCache.set(slide, { row: item, index: i });
       return item;
     }
@@ -824,6 +940,7 @@ export class SlideRail {
   private bindKeys(): void {
     this.host.tabIndex = 0;
     this.host.addEventListener('keydown', (e) => {
+      if (this.readOnly && (e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Delete')) return;
       if (e.key === 'Enter') {
         // Suppress the focused button's synthetic click: Return inserts once.
         e.preventDefault();

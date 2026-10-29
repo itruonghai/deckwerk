@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import WebSocket from 'ws';
+import { electronChildEnv } from '../../src/cli/electronDisplay.js';
 
 /**
  * Shared plumbing for the production-browser tests: launch a hidden Electron
@@ -532,6 +533,16 @@ export class Cdp {
       const root = document.querySelector(${JSON.stringify(selector)});
       if (!root) return { error: 'no element matches' };
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      // The first click selects the box and puts its resize handles up (its
+      // corners and the middles of its sides), so a glyph under one of them
+      // -- small fitted text at the box's edge -- has the second click land
+      // on the handle instead. Aim past them.
+      const box = (root.closest('.element') ?? root).getBoundingClientRect();
+      const xs = [box.left, (box.left + box.right) / 2, box.right];
+      const ys = [box.top, (box.top + box.bottom) / 2, box.bottom];
+      const corner = (x, y) => xs.some((hx, i) => ys.some((hy, j) => (i !== 1 || j !== 1)
+        && Math.abs(x - hx) < 14 && Math.abs(y - hy) < 14));
+      let fallback = null;
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const offset = node.data.search(/\\S/);
         if (offset < 0) continue;
@@ -541,13 +552,17 @@ export class Cdp {
         const rect = range.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
+        if (corner(x, y)) {
+          fallback ??= { x, y };
+          continue;
+        }
         const hit = document.elementFromPoint(x, y);
         if (!root.contains(hit)) {
           return { error: 'its first glyph is covered by ' + (hit?.className || hit?.tagName) };
         }
         return { x, y };
       }
-      return { error: 'node has no rendered text' };
+      return fallback ?? { error: 'node has no rendered text' };
     })()`);
     if ('error' in point) throw new Error(`cannot double-click ${label}: ${point.error}`);
     await this.doubleClickAt(point.x, point.y);
@@ -579,6 +594,11 @@ export class Cdp {
     if (end <= start) throw new Error(`cannot select empty range ${start}..${end}`);
     const from = await this.textGlyphPoint(selector, start, 0.15, `${label} start`);
     const to = await this.textGlyphPoint(selector, end - 1, 0.85, `${label} end`);
+    await this.selectBetween(from, to);
+  }
+
+  /** A click at `from` and a shift-click at `to`: the selection a person makes. */
+  async selectBetween(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
     await this.call('Input.dispatchMouseEvent', {
       type: 'mouseMoved', x: from.x, y: from.y, button: 'none', buttons: 0,
     });
@@ -913,7 +933,7 @@ export async function launchBrowser(
   ], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
+    env: electronChildEnv(),
   });
   const log = collectProcessOutput(child);
   return { process: child, log, ...await reportedPorts(child, electronArgs, log) };

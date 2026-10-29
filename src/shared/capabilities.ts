@@ -57,7 +57,7 @@ export function capabilities(): Capability[] {
         'role-title, role-heading, role-body, role-caption are the vocabulary.',
         'An inline `style` overrides the theme and should be a deliberate one-off.',
         'contentStyle applies CSS to the inner text content rather than the positioned box; use it for glyph paint such as gradient text, text strokes and shadows.',
-        'html may contain inline markup: <b>, <i>, <br>, <span>.',
+        'html may contain inline markup: <b>, <i>, <u>, <s> (strikethrough), <br>, <span>.',
         'paragraphSpacing (px) sets the gap between paragraphs and between bullets; unset keeps the theme default.',
         "align sets the horizontal setting of the type — 'left', 'center', 'right' or 'justify'.",
         "valign places the text inside its box — 'top', 'middle' or 'bottom' — which is what keeps a caption sitting against a figure rather than floating.",
@@ -75,7 +75,9 @@ export function capabilities(): Capability[] {
       notes: [
         '$…$ is inline and stays in the sentence flow; $$…$$ is display.',
         'A literal dollar sign is written \\$.',
+        'In authoring HTML write < inside maths as &lt; or \\lt: a bare y_{<k} starts an HTML tag and the text is cut off there (apply warns; validate lists it under mathProblems).',
         'The equation is part of the text element’s html — not a separate element.',
+        'Mark a term with \\step{label}{…} (or KaTeX’s \\htmlClass{step-label}{…}) so builds can reveal, colour or pulse it; see equation-builds.',
       ],
       elements: [
         text('cap-latex-title', 'Maths is text, not layout', TITLE, { class: ['role-title'] }),
@@ -99,6 +101,7 @@ export function capabilities(): Capability[] {
         'One <li> per point; inline markup (<b>, <i>) works inside items.',
         'The whole list is one text element; the editor’s "Bulleted list" checkbox toggles the same markup.',
         'paragraphSpacing (px) spaces the items; unset keeps the theme default.',
+        'An item is indented a level by nesting a <ul>/<ol> inside the <li> above it. A paragraph outside a list is indented with data-indent="1" to "8" on its <p>, 1.4em a step, the same step as a list level.',
       ],
       elements: [
         text('cap-lists-title', 'Lists are markup, not characters', { x: 160, y: 90, w: 1600, h: 150 }, { class: ['role-title'] }),
@@ -271,13 +274,46 @@ export function capabilities(): Capability[] {
       ],
     },
     {
+      id: 'video-compare',
+      what: 'Videos that play in sync, with a shared scrubber, and a before/after wipe.',
+      when: 'Real vs. simulated, before vs. after: two clips (or stills) the audience must compare frame for frame.',
+      notes: [
+        'syncGroup (data-sync-group) on two or more videos plays them from one clock while presenting, each clip measured from its own in-point (its trim start).',
+        'When the clips differ in length (each one’s trim window), syncLength (data-sync-length) on every member says how long the group runs: "shortest" (the default; leave it out) ends, or loops, with the shortest clip and cuts the rest; "hold" runs to the longest, shorter clips freezing on their last frame; "black" runs to the longest, shorter clips going black. The group loops at that length when the clip that sets it loops, so give every member the same loop flag. PDFs and thumbnails show the same frame (or black) the presentation would.',
+        'While presenting, hovering a synced video shows one bar along the bottom of the group: play/pause for the group and a scrubber over the group’s length. It never shows in PDFs, thumbnails or posters.',
+        'A wipe is two pictures stacked in the same box. The UPPER one (later in the HTML, higher z) carries compare: "wipe" (data-compare="wipe") and wipe: 0–1 (data-wipe, also accepts "40%"), the divider’s position across the box. It shows left of the divider; whatever is beneath shows right of it.',
+        'The lower layer needs nothing. For video pairs give both the same syncGroup so they show the same moment. Images work as either layer.',
+        'The presenter can drag the divider while presenting; that never edits the deck. The editor, thumbnails and PDF show it at the stored position.',
+        'In the editor: select two videos or images and click the Wipe chip under them (or right-click → Arrange as wipe, or Props → Compare → Arrange as wipe). With a two-clip wipe selected the chip, and the Wipe section in Props, choose its length: Shortest / Hold last / Black. A synced pair that is not a wipe has the same choice beside Play in sync.',
+      ],
+      elements: [
+        text('cap-compare-title', 'Real and simulated, one divider', TITLE, { class: ['role-title'] }),
+        {
+          id: 'cap-compare-sim', type: 'video', x: 460, y: 300, w: 1000, h: 563, rot: 0, z: 2,
+          opacity: 1, class: [], style: {}, src: 'assets/testclip.mp4', fit: 'cover',
+          autoplay: true, loop: true, muted: true, controls: false,
+          start: 0, end: null, poster: null, sourceBox: null, syncGroup: 'cap-compare',
+        },
+        {
+          id: 'cap-compare-real', type: 'video', x: 460, y: 300, w: 1000, h: 563, rot: 0, z: 3,
+          opacity: 1, class: [], style: {}, src: 'assets/testclip.mp4', fit: 'cover',
+          autoplay: true, loop: true, muted: true, controls: false,
+          start: 0, end: null, poster: null, sourceBox: null, syncGroup: 'cap-compare',
+          compare: 'wipe', wipe: 0.5, effects: [{ type: 'grayscale', amount: 1 }],
+        },
+        text('cap-compare-caption', 'Left of the divider is the upper clip, right is the one beneath; both run on one clock.', CAPTION, { class: ['role-caption'] }),
+      ],
+    },
+    {
       id: 'shapes',
-      what: 'Rectangles, ellipses, lines and arrows, including curved ones.',
+      what: 'Rectangles, ellipses, lines and arrows, including curved ones, and free-form paths.',
       when: 'Callouts, connectors, emphasis boxes.',
       notes: [
         'An arrow’s `control` is an absolute canvas-space point making it a quadratic curve.',
         'shape: "path" carries real SVG path data, scaled from pathSize to the element box — this is how imported vector art keeps its geometry.',
-        'arrowStart/arrowEnd put heads on a line or arrow at either end, or both. arrowSize sets the head length in pixels (unset: six stroke widths; never less than the line width, which ends the line in a point), so a thick line can keep a modest head. In HTML: data-arrow-size.',
+        'A free-form path (what the editor\'s pen draws): set pathSize equal to the box (w, h) and write the path in those pixels, e.g. path: "M 0 150 C 0 -50 300 -50 300 150 Z", pathSize: { w: 300, h: 150 }. Close it with Z and give it a fill for a filled shape; leave it open with fill: null and a stroke for a drawn line. With pathSize equal to the box, strokeWidth is in pixels and a resize redraws the path rather than stretching its stroke. Any SVG path command reads; the editor writes back M, L, C and Z when an author drags its points (double-click a path, or Edit points). In HTML: data-shape="path" data-path="…" data-path-size="300,150".',
+        'A path\'s strokeStyle draws its stroke as "pen" (the default when absent: a clean even line), "brush" (swells in the middle and tapers to a point at each end; a closed one breathes around its loop), "pencil" (thin, grainy, a little translucent) or "marker" (a flat, see-through highlighter: give it a wide strokeWidth, say 24). Lines, arrows and paths take it, and only a visible stroke shows it. In HTML: data-stroke-style="brush". Line Draw traces every style.',
+        'Every open line takes a cap on either end — a line, an arrow, a curve, a path drawn with the pen or the pencil: arrowStart/arrowEnd put arrowheads there, and startCap/endCap a "dot" or a "bar" where there is no arrowhead (an arrow is simply a line with arrowEnd). arrowSize sets the cap size in pixels (unset: six stroke widths; never less than the line width, which ends the line in a point), so a thick line can keep a modest head. strokeDash makes any stroke "dashed" or "dotted". In HTML: data-arrow-size, data-start-cap / data-end-cap, data-stroke-dash.',
         'A curly brace is shape: "brace", laid out like a line (endpoints at the box\'s left and right centre, rotated by rot). braceDepth is the signed distance from the chord to the point along the element\'s own +y (down when unrotated); half of it is the radius of every curl. In HTML: data-shape="brace" data-brace-depth="40".',
         'A drop shadow is CSS on the element: style: { filter: "drop-shadow(0px 8px 24px rgba(0, 0, 0, 0.3))" }. It follows the shape’s own paint (a line or an outline casts the shadow of its strokes), and Props → Shadow edits the same value.',
         'A gradient fill: fillGradient: { to: "#ec6b14", angle: 270, kind: "linear" } runs from fill to `to`; angle is degrees counter-clockwise from the right (270 = top to bottom); kind "radial" spreads from the centre. In HTML: data-fill-to, data-fill-angle, data-fill-gradient.',
@@ -317,6 +353,34 @@ export function capabilities(): Capability[] {
       ],
     },
     {
+      id: 'flip',
+      what: 'Any object mirrored left to right or top to bottom, as Keynote\'s Flip does it.',
+      when: 'A pointer or a photo that should face the other way, without redrawing or re-exporting it.',
+      notes: [
+        'flipX: true mirrors an object left to right and flipY: true top to bottom, in its own frame before rot turns it; the box (x, y, w, h) does not move. Absent means not flipped. Text stays live and editable, drawn mirrored.',
+        'In HTML a flip is part of the transform: transform: rotate(30deg) scaleX(-1). A page cannot tell flipY from flipX turned half way round, so a mirror written on a page comes back as whichever needs the smaller rotation.',
+        'Lines, arrows and braces carry no flags (any are ignored): reverse one with rot + 180 or by moving its ends. A mirror written on a page is folded into its endpoints, curve control point and brace depth.',
+        'Props → Geometry → Flip mirrors along the slide\'s own axes whatever the rotation: the flag toggles and rot becomes −rot.',
+      ],
+      elements: [
+        text('cap-flip-title', 'Flipped objects', TITLE, { class: ['role-title'] }),
+        {
+          id: 'cap-flip-plain', type: 'shape', x: 360, y: 360, w: 480, h: 300, rot: 0, z: 2,
+          opacity: 1, class: [], style: {}, shape: 'path', fill: '#2563eb', stroke: null,
+          strokeWidth: 0, radius: 0, arrowStart: false, arrowEnd: false,
+          path: 'M0,90 L300,90 L300,0 L480,150 L300,300 L300,210 L0,210 Z', pathSize: { w: 480, h: 300 },
+        },
+        {
+          id: 'cap-flip-mirrored', type: 'shape', x: 1080, y: 360, w: 480, h: 300, rot: 0, z: 2,
+          flipX: true,
+          opacity: 1, class: [], style: {}, shape: 'path', fill: '#ec6b14', stroke: null,
+          strokeWidth: 0, radius: 0, arrowStart: false, arrowEnd: false,
+          path: 'M0,90 L300,90 L300,0 L480,150 L300,300 L300,210 L0,210 Z', pathSize: { w: 480, h: 300 },
+        },
+        text('cap-flip-caption', 'The same path; the right one has flipX: true.', CAPTION, { class: ['role-caption'] }),
+      ],
+    },
+    {
       id: 'builds',
       what: 'Timeline builds: reveal objects on click or after the previous step.',
       when: 'Walking an audience through a slide one point at a time.',
@@ -326,8 +390,11 @@ export function capabilities(): Capability[] {
         'Objects with no build are visible from the start.',
         "An appear with value: 'byParagraph' on a text element reveals it one paragraph (or list item) at a time, in document order — one click each, or a cascade when triggered afterPrev/withPrev.",
         'withPrev fires together with the step before it; afterPrev fires on its own after that step, with an optional delay in ms.',
-        'An appear or disappear with value: \'dissolve\' fades the element in or out; an appear with value: \'draw\' on a shape is Line Draw: a line or arrow grows from its start with its head leading, and a box, ellipse or path is traced along its outline with its fill following. action.duration is the time in ms (defaults 1000 and 600), and an afterPrev build waits for an animated one before it to finish. In authoring HTML: data-build="click" data-build-effect="dissolve" data-build-duration="800". Animations play when a step is reached by advancing (including builds that run on arriving at a slide); jumping to a step shows its finished state.',
+        'An appear or disappear with value: \'dissolve\' fades the element in or out; an appear with value: \'pop\' grows it in from smaller, overshoots a little and settles (default 500 ms; action.popFrom is the starting size, default 0.6, and action.popPeak the overshoot, default 1.06; in authoring HTML data-build-pop-from / data-build-pop-peak); an appear with value: \'draw\' on a shape is Line Draw: a line, an arrow or an open path grows from its start with its caps riding the tip, and a box, ellipse or closed path is traced along its outline (a path one run after another; a shape with no stroke in a hairline of its fill colour) and its fill fades in once the outline is complete. action.duration is the time in ms (defaults 1000 and 600), and an afterPrev build waits for an animated one before it to finish. In authoring HTML: data-build="click" data-build-effect="dissolve" data-build-duration="800". Animations play when a step is reached by advancing (including builds that run on arriving at a slide); jumping to a step shows its finished state.',
         "The other actions are disappear, play/pause (media), seek (value: seconds) and addClass/removeClass (value: the class name) — the last two are the hook for anything theme.css can animate.",
+        'In authoring HTML, data-build states an object\'s first appearance, and builds run in document order. data-build-order="2" on an object makes its appearance the second step whatever the paint order (1 is first).',
+        'When the attributes cannot say a slide\'s whole timeline — a disappear, a media step, a by-paragraph reveal, a second build of one object, builds in another order than paint order — an exported <section> also carries <script type="application/deckwerk-timeline">[…]</script>: the timeline as deck.json holds it, one entry per line, naming objects by data-element-id. It is the order of the steps and every step the attributes cannot state; what an attribute states wins. Move an entry to move that step; add or delete entries to add or remove steps. A section copied to another deck keeps the block and so its whole timeline (objects whose ids are taken there are renamed and their steps follow them).',
+        "type: 'pulse' briefly enlarges any object about its own centre (scale, default 1.6; duration, default 800 ms), holds it there for a beat and settles back without moving anything, and with value: 'lift' (whole objects only; a term pulse ignores it) it also casts a drop shadow and rises over its neighbours while it is up; type: 'terms' steps through an equation's marked terms — see equation-builds. In authoring HTML: data-pulse=\"click\" data-pulse-scale=\"1.6\" (data-pulse-lift=\"true\" for the lift). Keynote's other two Actions sit beside it: type: 'jiggle' wobbles the object side to side about its centre, each swing smaller (duration, default 700 ms), and type: 'pop' is a smooth bump: it eases up to its size and back down, symmetric and never below its own size (scale, default 1.3; duration, default 700 ms); in HTML data-jiggle=\"click\" and data-pop=\"click\" data-pop-scale=\"1.3\". Like a pulse, both end exactly where they began. action.damping (0 to 1; data-pulse-damping, data-pop-damping, data-jiggle-damping) sets how softly each moves: on a pulse or a pop 0 is a sharp snap out of rest and back into it and 1 a fully smooth ease at both ends, like a critically damped spring (defaults 0.8 and 1); on a jiggle it is how fast the swings die out (default 0.5). All three move about what shows: text about the middle of its words, not of a bigger box (a text box with a fill or border about its box), anything else about its box.",
       ],
       elements: [
         text('cap-build-title', 'Builds', TITLE, { class: ['role-title'] }),
@@ -395,6 +462,69 @@ export function capabilities(): Capability[] {
       ],
     },
     {
+      id: 'equation-builds',
+      what: 'Build an equation term by term: reveal or colour its marked terms one step at a time, and pulse one to point at it.',
+      when: 'A derivation or a definition you talk through part by part, rather than showing the whole equation at once.',
+      notes: [
+        'Mark terms in the TeX: \\step{1}{…}, \\step{2}{…} (KaTeX’s \\htmlClass{step-2}{…} and MathJax’s \\class{step-2}{…} mean the same). Numbers set the order; a word label (\\step{force}{f}) names a term and comes after the numbers. A label used twice is one term.',
+        "An action { type: 'terms', target, value: 'appear' } steps through every marked term in order, one click each (or a cascade when afterPrev/withPrev), like a by-paragraph build. The unmarked parts are on screen from the start; an unrevealed term keeps its place, so nothing reflows.",
+        "value: 'color' paints the terms instead (action.color, a CSS colour) and they stay painted. action.term: '2' acts on that one term only. action.duration is the fade or colour change in ms (default 400; 0 is instant).",
+        "{ type: 'pulse', target, term: '2' } enlarges that term for a moment (scale default 1.6, duration default 800 ms) and settles it back exactly; without term the whole object pulses. Any object can pulse. 'jiggle' (wobbles side to side, duration default 700 ms) and 'pop' (a smooth bump that eases up and back down, scale default 1.3, duration default 700 ms) take the same target and term. action.damping (0 to 1) sets how softly each moves — see builds.",
+        'In authoring HTML, on the text element: data-term-build="click" (data-term-effect="color" data-term-color="#d9480f" data-term-duration="400" data-term="2" optional) and data-pulse="click" data-pulse-term="2" (data-pulse-scale="1.6" data-pulse-duration="800" data-pulse-damping="0.8" optional; data-pulse-lift="true" lifts a whole-object pulse); likewise data-jiggle="click" (data-jiggle-term, data-jiggle-duration, data-jiggle-damping) and data-pop="click" (data-pop-term, data-pop-scale, data-pop-duration, data-pop-damping). A page states the first build of each kind; the Build panel can add more.',
+        'Jumping to a step, the presenter preview and PDF export show the finished state of each step; a pulse, a jiggle or a pop leaves no state behind.',
+      ],
+      elements: [
+        text('cap-eqb-title', 'Momentum balance, term by term', TITLE, { class: ['role-title'] }),
+        text(
+          'cap-eqb-equation',
+          '$$\\nabla \\cdot \\sigma \\step{1}{+ \\, f} = \\step{2}{\\rho \\, \\ddot{u}}$$',
+          { x: 160, y: 360, w: 1600, h: 300 },
+          { class: ['role-title'], align: 'center', valign: 'middle' },
+        ),
+      ],
+      timeline: [
+        {
+          id: 'cap-eqb-terms',
+          trigger: { on: 'click', ref: null, delay: 0 },
+          action: { type: 'terms', target: 'cap-eqb-equation', value: 'appear' },
+        },
+        {
+          id: 'cap-eqb-pulse',
+          trigger: { on: 'click', ref: null, delay: 0 },
+          action: { type: 'pulse', target: 'cap-eqb-equation', value: null, term: '2' },
+        },
+      ],
+    },
+    {
+      id: 'equation-morph',
+      what: `${MORPH_NAME} between two equations moves them glyph by glyph.`,
+      when: 'An equation that grows or is rewritten from one slide to the next: f(x) = 0 → f(x) = y → f(x) = y + 1.',
+      notes: [
+        'Pair the two text elements with the same morphId (data-morph) and set morphFromPrevious on the later slide, exactly as for any Morph.',
+        'When both sides hold maths and say different things, every KaTeX glyph they share (matched by symbol in reading order, position breaking ties) travels to its new place and grows or shrinks to its new size; glyphs only one side has fade out or in. Glyphs stay live type, so they stay crisp, and the last frame is the next slide exactly.',
+        'Nothing shared — or a rotated element — falls back to the ordinary Morph of the whole object.',
+      ],
+      elements: [
+        text('cap-eqm-title', 'Equilibrium', TITLE, { class: ['role-title'] }),
+        text('cap-eqm-equation', '$$\\nabla \\cdot \\sigma = 0$$', { x: 160, y: 360, w: 1600, h: 300 }, {
+          class: ['role-title'], align: 'center', valign: 'middle', morphId: 'cap-eqm',
+        }),
+      ],
+    },
+    {
+      id: 'equation-morph-target',
+      what: 'The second half of the equation pair: the same identity, a richer equation.',
+      when: 'Always authored together with the slide before it.',
+      notes: ['∇, ·, σ and = move to their new places; + f and ρü fade in, 0 fades out.'],
+      slide: { morphFromPrevious: true, morphDuration: 1200 },
+      elements: [
+        text('cap-eqm2-title', 'Momentum balance', TITLE, { class: ['role-title'] }),
+        text('cap-eqm2-equation', '$$\\nabla \\cdot \\sigma + f = \\rho \\, \\ddot{u}$$', { x: 160, y: 360, w: 1600, h: 300 }, {
+          class: ['role-title'], align: 'center', valign: 'middle', morphId: 'cap-eqm',
+        }),
+      ],
+    },
+    {
       id: 'background',
       what: 'A slide background colour, and the other slide-level properties.',
       when: 'Section dividers; hiding a slide; picking a geometry preset.',
@@ -402,8 +532,8 @@ export function capabilities(): Capability[] {
         'A background image covers the canvas; text on it needs contrast.',
         "layout is a geometry preset — 'freeform' (default), 'standard' (title + body) or 'title' — and themes may decorate it but never own its positions.",
         'layoutMasterId and layoutPlaceholder are editor-maintained links between fixed layout masters and their title/body placeholders; ordinary authored elements should leave them unset.',
-        'skipped: true keeps a slide in the deck and editable but steps over it when presenting. Use it instead of deleting a slide you may want back.',
-        'notes is the presenter-view script for the slide; name is the label in the slide rail.',
+        'skipped: true keeps a slide in the deck and editable but steps over it when presenting. Use it instead of deleting a slide you may want back. In authoring HTML: data-skipped="true" on the <section>; removing it from an exported section un-skips the slide.',
+        'notes is the presenter-view script for the slide; name is the label in the slide rail. In authoring HTML the notes are an <aside class="notes">…</aside> inside the <section>, plain text, hidden on the page: edit its words to change them, empty it to clear them. A section with no aside leaves the slide\'s notes as they are.',
       ],
       slide: { background: { color: '#0f172a', image: null } },
       elements: [
@@ -475,6 +605,47 @@ export function capabilities(): Capability[] {
           id: 'cap-web', type: 'web', x: 160, y: 300, w: 1600, h: 640, rot: 0, z: 2,
           opacity: 1, class: [], style: {},
           src: 'assets/web/chart.a1b2c3d4.html', poster: null, interactive: true, title: 'Papers per year',
+        },
+      ],
+    },
+    {
+      id: 'code-block',
+      what: 'Source code, syntax-highlighted with Shiki in a bundled colour scheme, offline, the same in the editor, the player, web export and PDF.',
+      when: 'Any listing on a slide: an algorithm, a kernel, a config. Never fake code with a monospace text box.',
+      notes: [
+        'Fields: code (verbatim; whitespace, tabs and blank lines are kept), language, scheme, fontSize (px; line height and padding scale with it), lineNumbers.',
+        'language: python, javascript, typescript, c, cpp, cuda (highlighted as C++), rust, glsl, bash, json, yaml, latex, html, css, sql, go, java, julia, matlab, plaintext. Common aliases (py, ts, sh, yml, tex, cu…) are accepted.',
+        "scheme: github-light, github-dark, one-dark-pro, solarized-light, dracula, nord, or deck — derived from the deck theme's text, muted, accent and palette colours, so the code matches the slides and follows a theme change.",
+        'In authoring HTML: <pre data-element="code" data-language="python" data-scheme="github-dark" data-font-size="28" data-line-numbers="true"><code>…HTML-escaped code…</code></pre>. A bare <pre><code class="language-python"> is a code block too. One newline straight after <code> and one straight before </code> are formatting and dropped. Size the box with CSS like anything else; its height should be lines × 1.5 × fontSize + 1.5 × fontSize.',
+        "Line builds, like paragraph builds on text: each is a timeline entry { action: { type: 'lines', target, value, lines? } }. value 'appear' reveals the lines (they start hidden; lines no appear names show from the start), 'highlight' tints them (action.color, default a soft yellow), 'dim' fades every other line. lines is '3', '3-5' or '3-5,8'; without it the entry steps through the whole block one line per click (\"Appear by line\"). A highlight or a dim holds until the block's next one replaces it; a reveal ends it.",
+        "In authoring HTML, the block's line builds in order ride on the <pre>: data-build-lines=\"each; highlight:3-5; dim:7\" — each ';'-separated part one build on its own click: bare lines (or each) appear, highlight:<lines> tints, dim:<lines> fades the rest. The deck keeps each build's trigger, colour and place among the slide's other builds when the page is saved.",
+        'Borders, a corner radius and a shadow on the element style apply to the block; the scheme owns its background, ink and type.',
+      ],
+      elements: [
+        text('cap-code-title', 'Code, highlighted', TITLE, { class: ['role-title'] }),
+        {
+          id: 'cap-code', type: 'code', x: 160, y: 300, w: 1100, h: 210, rot: 0, z: 2,
+          opacity: 1, class: [], style: { 'border-radius': '12px' },
+          code: 'def stress(F, mu, lam):\n    J = np.linalg.det(F)\n    Finv_T = np.linalg.inv(F).T\n    return mu * (F - Finv_T) + lam * np.log(J) * Finv_T\n',
+          language: 'python', scheme: 'github-dark', fontSize: 28, lineNumbers: true,
+        },
+        text('cap-code-caption', 'Neo-Hookean first Piola–Kirchhoff stress, revealed then highlighted line by line.', CAPTION, { class: ['role-caption'] }),
+      ],
+      timeline: [
+        {
+          id: 'cap-code-lines',
+          trigger: { on: 'click', ref: null, delay: 0 },
+          action: { type: 'lines', target: 'cap-code', value: 'appear', lines: '2-3' },
+        },
+        {
+          id: 'cap-code-last',
+          trigger: { on: 'click', ref: null, delay: 0 },
+          action: { type: 'lines', target: 'cap-code', value: 'appear', lines: '4' },
+        },
+        {
+          id: 'cap-code-focus',
+          trigger: { on: 'click', ref: null, delay: 0 },
+          action: { type: 'lines', target: 'cap-code', value: 'highlight', lines: '4' },
         },
       ],
     },

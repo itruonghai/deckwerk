@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { renameRetiredFields } from './fieldAliases.js';
+import { normalizeHtmlLineHeights, normalizeStyleLineHeight } from './lineHeight.js';
+import { mediaFragmentTrim, withoutFragment } from './mediaFragment.js';
 
 /**
  * The deck format. This schema is the single source of truth: `deck.json` is
@@ -92,13 +94,25 @@ const BaseElement = z.object({
   h: z.number().positive(),
   /** Clockwise degrees about the element's centre. */
   rot: z.number().default(0),
+  /**
+   * Mirrored left to right (`flipX`) or top to bottom (`flipY`) in the
+   * element's own frame, before `rot` turns it, so the box itself never moves.
+   * Absent means not flipped. Lines, arrows and braces ignore both: their
+   * flip is folded into their endpoints instead (see flip.ts).
+   */
+  flipX: z.boolean().optional(),
+  flipY: z.boolean().optional(),
   /** Paint order within the slide; ties break on array order. */
   z: z.number().int().default(0),
   opacity: z.number().min(0).max(1).default(1),
   /** CSS classes hooking this element up to theme.css. */
   class: z.array(z.string()).default([]),
-  /** Inline style escape hatch, applied after classes. */
-  style: z.record(z.string()).default({}),
+  /**
+   * Inline style escape hatch, applied after classes. A `line-height` is
+   * stored as a ratio of the font size (see lineHeight.ts), so it is
+   * converted here, on every parse, from a length stated beside a px size.
+   */
+  style: z.record(z.string()).default({}).transform(normalizeStyleLineHeight),
   /** Explicit identity shared by elements manually paired for Morph. */
   morphId: z.string().nullable().optional(),
   /** Stable ancestry retained when an object is duplicated, for opt-in Auto-pair. */
@@ -125,14 +139,15 @@ export const MediaEffectSchema = z.discriminatedUnion('type', [
 const TextElement = BaseElement.extend({
   type: z.literal('text'),
   /** Inline HTML. Fonts and sizes are expected to come from theme.css. */
-  html: z.string().default(''),
+  html: z.string().default('').transform(normalizeHtmlLineHeights),
   /**
    * CSS applied directly to the inner text-content node rather than the
    * positioned element wrapper. This is the escape hatch for glyph paint
    * such as gradient text, clipping and text strokes that cannot work through
    * inherited wrapper CSS alone.
    */
-  contentStyle: z.record(z.string()).optional(),
+  contentStyle: z.record(z.string()).optional()
+    .transform((style) => style && normalizeStyleLineHeight(style)),
   /** Shrink text as needed to keep it inside its box; never enlarge past its authored size. */
   autoFit: z.boolean().optional(),
   /**
@@ -225,6 +240,12 @@ const ImageElement = BaseElement.extend({
   borderWidth: z.number().min(0).optional(),
   borderRadius: z.number().min(0).optional(),
   /**
+   * The upper layer of a before/after wipe, exactly as on a video: a still
+   * over a still, or a still over a clip. See `compare` on VideoElement.
+   */
+  compare: z.enum(['wipe']).optional(),
+  wipe: z.number().min(0).max(1).optional(),
+  /**
    * A crop, expressed as where the *whole* image sits relative to this
    * element's box. The element box is the visible window; anything outside it
    * is clipped.
@@ -259,6 +280,34 @@ const VideoElement = BaseElement.extend({
   end: z.number().min(0).nullable().default(null),
   poster: z.string().nullable().default(null),
   /**
+   * Videos on a slide that share a sync group play from one clock while
+   * presenting: one of them keeps time and the rest follow it, measured from
+   * each one's own in-point, so a real clip and its simulation stay
+   * frame-matched however long the talk dwells on them.
+   */
+  syncGroup: z.string().min(1).optional(),
+  /**
+   * How long a sync group runs when its clips differ in length (each clip's
+   * length being its trim window): `shortest` (the default) ends, or loops,
+   * with the shortest clip, cutting the rest; `hold` runs to the longest,
+   * shorter clips freezing on their last frame; `black` runs to the longest,
+   * shorter clips going black. Like `syncGroup` it is written on every member;
+   * the first member in z that carries it decides (src/shared/compare.ts).
+   */
+  syncLength: z.enum(['shortest', 'hold', 'black']).optional(),
+  /**
+   * A before/after wipe. On the upper of two pictures stacked in one box,
+   * `compare: 'wipe'` shows this one only left of a vertical divider and
+   * whatever lies beneath it (usually its sync partner, or a still) right of
+   * it. `wipe` is where the divider sits, as a fraction of the box's width
+   * (default 0.5); the presenter can drag it while presenting, which moves the
+   * divider on screen without editing the deck. Set on the top layer only, so
+   * there is one position and nothing to disagree about; the helpers that
+   * read, write and arrange it live in src/shared/compare.ts.
+   */
+  compare: z.enum(['wipe']).optional(),
+  wipe: z.number().min(0).max(1).optional(),
+  /**
    * Crop, expressed exactly as on an image: where the *whole* video sits
    * relative to this element's box, which acts as the visible window.
    *
@@ -271,6 +320,14 @@ const VideoElement = BaseElement.extend({
     .nullable()
     .default(null),
 });
+
+/** The ways a path's stroke can be drawn; the first is the default. */
+export const STROKE_STYLES = ['pen', 'brush', 'pencil', 'marker'] as const;
+export type StrokeStyle = (typeof STROKE_STYLES)[number];
+
+/** The broken strokes; a stroke with none is solid. */
+export const STROKE_DASHES = ['dashed', 'dotted'] as const;
+export type StrokeDash = (typeof STROKE_DASHES)[number];
 
 const ShapeElement = BaseElement.extend({
   type: z.literal('shape'),
@@ -300,6 +357,15 @@ const ShapeElement = BaseElement.extend({
     .object({ w: z.number().positive(), h: z.number().positive() })
     .nullable()
     .default(null),
+  /**
+   * How a path's stroke is drawn: `pen` (absent too) a clean even line,
+   * `brush` swelling in the middle and tapering at its ends, `pencil` thin,
+   * grainy and a little translucent, `marker` a flat, see-through
+   * highlighter. Lines, arrows and paths take it; see `strokeStyles.ts`.
+   */
+  strokeStyle: z.enum(STROKE_STYLES).optional(),
+  /** A dashed or a dotted stroke; absent is solid. */
+  strokeDash: z.enum(STROKE_DASHES).optional(),
   arrowStart: z.boolean().default(false),
   arrowEnd: z.boolean().default(false),
   /**
@@ -308,6 +374,16 @@ const ShapeElement = BaseElement.extend({
    * than the line is wide: at that size the line simply ends in a point.
    */
   arrowSize: z.number().positive().optional(),
+  /**
+   * How an open line ends, when not in an arrowhead (`arrowStart` and
+   * `arrowEnd` say where those are, and an arrowhead wins): `dot`, a round
+   * dot on the end, or `bar`, a short stroke across it. Absent is a plain
+   * end. Every open line takes them — a line, an arrow, a curve, a path
+   * drawn with the pen or the pencil; read and write them through
+   * `capOf`/`setCap` in lineFamily.ts.
+   */
+  startCap: z.enum(['dot', 'bar']).optional(),
+  endCap: z.enum(['dot', 'bar']).optional(),
   /** Absolute canvas-space control point for an editable quadratic curve. */
   control: z.object({ x: z.number(), y: z.number() }).nullable().optional(),
   /**
@@ -351,6 +427,37 @@ const WebElement = BaseElement.extend({
 });
 
 /**
+ * Source code, shown as a syntax-highlighted block.
+ *
+ * The code is stored exactly as written — indentation, tabs and blank lines
+ * are content — and highlighted with Shiki wherever the element renders
+ * (shared/codeHighlight.ts), from grammars and colour schemes bundled with
+ * the app, so a talk highlights the same with or without a network. Nothing
+ * about the colours is stored: changing `scheme` or `language` re-colours
+ * the same text, and the `deck` scheme follows the deck's theme colours.
+ */
+const CodeElement = BaseElement.extend({
+  type: z.literal('code'),
+  /** The source text, verbatim. Lines are split on `\n`. */
+  code: z.string().default(''),
+  /**
+   * Grammar id, e.g. `python`, `cuda`, `bash` (CODE_LANGUAGES in
+   * shared/codeBlocks.ts). A string rather than an enum so a deck naming a
+   * language this build does not know still opens; it renders as plain text.
+   */
+  language: z.string().default('plaintext'),
+  /**
+   * Colour scheme id, e.g. `github-dark` or `deck` (CODE_SCHEMES in
+   * shared/codeBlocks.ts). Unknown ids render in the default scheme.
+   */
+  scheme: z.string().default('github-dark'),
+  /** Type size in canvas pixels; line height and padding scale with it. */
+  fontSize: z.number().positive().default(28),
+  /** A gutter of line numbers down the left edge. */
+  lineNumbers: z.boolean().default(false),
+});
+
+/**
  * Produced by the Keynote importer when it meets an object it cannot map.
  * Carries the original geometry so the slide stays laid out correctly, and
  * renders as a labelled dashed box so the gap is visible rather than silent.
@@ -369,6 +476,7 @@ export const ElementSchema = z.discriminatedUnion('type', [
   ShapeElement,
   HtmlElement,
   WebElement,
+  CodeElement,
   UnsupportedElement,
 ]);
 
@@ -406,6 +514,14 @@ export const ActionSchema = z.object({
     'seek',
     'addClass',
     'removeClass',
+    // An equation's marked terms, revealed or coloured one per step (see
+    // shared/equationTerms.ts), and the emphases a term or an object can
+    // take: a pulse, a jiggle and a pop.
+    'terms',
+    'pulse',
+    'jiggle',
+    'pop',
+    'lines',
   ]),
   target: Id,
   /**
@@ -413,11 +529,53 @@ export const ActionSchema = z.object({
    * `"byParagraph"` reveals text a paragraph at a time and `"draw"` draws a
    * line or arrow in from its start to its end. On `appear` or `disappear`,
    * `"dissolve"` fades the element in or out and `"blur"` brings it into (or
-   * takes it out of) focus as it fades.
+   * takes it out of) focus as it fades. On `appear`, `"pop"` grows the
+   * element in from smaller, overshoots a little and settles.
+   *
+   * On `pulse` of a whole object, `"lift"` also casts a drop shadow at the
+   * peak and paints the object over its neighbours while it is up.
+   *
+   * On `lines` (a code element only; shared/codeBlocks.ts), what happens to
+   * the lines it names: `"appear"` (default) reveals them, `"highlight"`
+   * tints them and `"dim"` fades every other line. A highlight or a dim holds
+   * until the block's next one replaces it, or a reveal ends it.
    */
   value: z.union([z.number(), z.string()]).nullable().default(null),
-  /** Milliseconds an animated build takes (`"draw"`, `"dissolve"`, `"blur"`). */
+  /** Milliseconds an animated build takes (`"draw"`, `"dissolve"`, `"blur"`, `"pop"`). */
   duration: z.number().min(0).optional(),
+  /** On a `"pop"`: the size it grows from, as a fraction of its own (default 0.6). */
+  popFrom: z.number().min(0).max(1).optional(),
+  /** On a `"pop"`: the size it overshoots to before settling at 1 (default 1.06). */
+  popPeak: z.number().min(1).max(2).optional(),
+  /**
+   * The equation term a `terms` action or an emphasis (`pulse`, `jiggle`,
+   * `pop`) acts on: the label of a `\step{label}{…}`
+   * (`\htmlClass{step-label}{…}`) marker in the target's TeX. Absent, a
+   * `terms` action steps through every term in order — one step each, like a
+   * by-paragraph reveal — and an emphasis moves the whole object. On
+   * `terms`, `value` is `"appear"` (default) or `"color"`.
+   */
+  term: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+  /**
+   * The code lines a `lines` action acts on, 1-based: `"3"`, `"3-5"` or
+   * `"3-5,8"`. Absent, it steps through every line of the block in order —
+   * one step per line, like a by-paragraph reveal.
+   */
+  lines: z.string().regex(/^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/).optional(),
+  /**
+   * The colour a `terms` action with value `"color"` paints its terms, or a
+   * `lines` highlight tints its lines.
+   */
+  color: z.string().optional(),
+  /** How far a `pulse` (default 1.6) or a `pop` (default 1.3) enlarges its target at the peak. */
+  scale: z.number().min(1).max(4).optional(),
+  /**
+   * How softly an emphasis moves, 0 to 1. On `pulse` and `pop`, 0 is a sharp
+   * snap out of rest and back into it, and 1 a fully smooth ease at both
+   * ends (defaults 0.8 and 1); on `jiggle`, how fast the swings die out, 0
+   * hardly at all and 1 quickly (default 0.5).
+   */
+  damping: z.number().min(0).max(1).optional(),
 });
 
 export const TimelineEntrySchema = z.object({
@@ -513,6 +671,7 @@ export type ImageEl = z.infer<typeof ImageElement>;
 export type VideoEl = z.infer<typeof VideoElement>;
 export type ShapeEl = z.infer<typeof ShapeElement>;
 export type HtmlEl = z.infer<typeof HtmlElement>;
+export type CodeEl = z.infer<typeof CodeElement>;
 export type UnsupportedEl = z.infer<typeof UnsupportedElement>;
 export type Slide = z.infer<typeof SlideSchema>;
 export type Comment = z.infer<typeof CommentSchema>;
@@ -529,7 +688,7 @@ export const DECK_VERSION = 1 as const;
  * path-annotated message rather than a raw ZodError dump.
  */
 export function parseDeck(raw: unknown): Deck {
-  const result = DeckSchema.safeParse(migrateDeckMorphDuration(renameRetiredFields(raw)));
+  const result = DeckSchema.safeParse(migrateVideoFragments(migrateDeckMorphDuration(renameRetiredFields(raw))));
   if (result.success) return result.data;
   const details = result.error.issues
     .map((i) => `  ${i.path.join('.') || '<root>'}: ${i.message}`)
@@ -557,6 +716,30 @@ function migrateDeckMorphDuration(raw: unknown): unknown {
         : { ...slide, morphDuration: duration };
     }),
   };
+}
+
+/**
+ * A video src carrying a media fragment (`assets/x.mp4#t=15,20`) loads as the
+ * bare file with that trim in `start`/`end`, which is where the deck keeps it;
+ * a trim the fields already state wins. Runs on the copy `renameRetiredFields`
+ * made, so it edits in place.
+ */
+function migrateVideoFragments(raw: unknown): unknown {
+  const slides = raw && typeof raw === 'object' ? (raw as { slides?: unknown }).slides : null;
+  if (!Array.isArray(slides)) return raw;
+  for (const slide of slides) {
+    const elements = slide && typeof slide === 'object' ? (slide as { elements?: unknown }).elements : null;
+    if (!Array.isArray(elements)) continue;
+    for (const element of elements as Array<Record<string, unknown>>) {
+      if (!element || element.type !== 'video' || typeof element.src !== 'string') continue;
+      const trim = mediaFragmentTrim(element.src);
+      if (!trim) continue;
+      element.src = withoutFragment(element.src);
+      if (!element.start) element.start = trim.start;
+      if (element.end === undefined || element.end === null) element.end = trim.end;
+    }
+  }
+  return raw;
 }
 
 /**

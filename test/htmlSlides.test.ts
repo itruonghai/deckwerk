@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { emptyDeck, parseDeck, type SlideElement } from '../src/shared/deck.js';
+import { applyAgentOperations } from '../src/shared/agent.js';
+import { emptyDeck, parseDeck, type Deck, type Slide, type SlideElement } from '../src/shared/deck.js';
 import {
+  authoringListCss,
   buildFromNode,
   elementFromNode,
   htmlChangeLabel,
   htmlSlideScope,
+  htmlSyncOperations,
+  htmlSyncSummary,
   slideFromMeasured,
   slidesFromMeasured,
   slideToHtml,
   slidesToHtml,
   type MeasuredNode,
 } from '../src/shared/htmlSlides.js';
+import { parsePath, pathGeometry } from '../src/shared/pathNodes.js';
+import { PLAYER_TYPE_CSS } from '../src/shared/playerTypeCss.js';
 
 /**
  * The pure half of HTML authoring: browser-measured facts in, deck objects out.
@@ -72,6 +78,32 @@ describe('measured nodes become deck objects', () => {
     expect(element?.style).toEqual({ color: '#ff3366', 'font-size': '80px' });
   });
 
+  it('keeps text a flex container centres where the browser drew it', () => {
+    // A banner or badge centring its own text with flexbox was stored top-left.
+    const banner = elementFromNode(node({
+      attrs: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
+    }), 'banner', 1);
+    expect(banner).toMatchObject({ type: 'text', align: 'center', valign: 'middle' });
+
+    const column = elementFromNode(node({
+      attrs: { flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center' },
+    }), 'column', 1);
+    expect(column).toMatchObject({ align: 'center', valign: 'bottom' });
+
+    // An explicit data-valign (every export carries one) still wins, and a
+    // deck text box's own markup keeps the alignment it states.
+    const stated = elementFromNode(node({
+      dataset: { valign: 'top' },
+      attrs: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center' },
+    }), 'stated', 1);
+    expect(stated).toMatchObject({ align: 'center', valign: 'top' });
+    const exported = elementFromNode(node({
+      preformatted: true,
+      attrs: { textAlign: 'left', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' },
+    }), 'exported', 1);
+    expect(exported).toMatchObject({ align: 'left', valign: 'top' });
+  });
+
   it('drops layout declarations that did their job during measurement', () => {
     // `display: flex` on an absolutely positioned box would re-flow the text
     // the geometry was measured against.
@@ -102,6 +134,27 @@ describe('measured nodes become deck objects', () => {
       tag: 'video', attrs: { src: 'a.mp4' }, dataset: { trim: '3,' },
     }), 'clip2', 2) as Extract<SlideElement, { type: 'video' }>;
     expect(untrimmed).toMatchObject({ start: 3, end: null });
+  });
+
+  it('reads a media fragment on a video src as its trim, and keeps the file name clean', () => {
+    // Hand-written: the fragment is the only place the trim is said.
+    const fragment = elementFromNode(node({
+      tag: 'video', attrs: { src: 'assets/clip.mp4#t=15.0,20.0' },
+    }), 'clip', 2) as Extract<SlideElement, { type: 'video' }>;
+    expect(fragment).toMatchObject({ src: 'assets/clip.mp4', start: 15, end: 20 });
+
+    // Exported: `#t=` is the preview in-point, `data-trim` the trim.
+    const exported = elementFromNode(node({
+      tag: 'video', attrs: { src: 'assets/clip.mp4#t=2' }, dataset: { trim: '2,8' },
+    }), 'clip2', 2) as Extract<SlideElement, { type: 'video' }>;
+    expect(exported).toMatchObject({ src: 'assets/clip.mp4', start: 2, end: 8 });
+
+    // A cropped clip's file rides on data-src.
+    const cropped = elementFromNode(node({
+      tag: 'div', html: '',
+      dataset: { element: 'video', src: 'assets/clip.mp4#t=4,6', crop: '0,0,800,120' },
+    }), 'clip3', 2) as Extract<SlideElement, { type: 'video' }>;
+    expect(cropped).toMatchObject({ src: 'assets/clip.mp4', start: 4, end: 6 });
   });
 
   it('lands an imported round crop as one editable picture', () => {
@@ -493,9 +546,58 @@ describe('deck objects become authored HTML', () => {
 
     expect(html).toContain('data-element="shape"');
     expect(html).toContain('data-shape="arrow"');
-    expect(html).toContain('data-control="400,240"');
+    // The bend is said relative to the box's top-left corner, so it moves
+    // with the arrow when an agent edits only `left`/`top`.
+    expect(html).toContain('data-control-offset="200,-60"');
+    expect(html).not.toContain('data-control=');
     expect(html).toContain('data-arrow-end="true"');
     expect(html).not.toContain('data-arrow-start');
+  });
+
+  it('moves a bent arrow\'s control point with its box', () => {
+    const arrow = (dataset: Record<string, string>) => elementFromNode(node({
+      tag: 'div', html: '', rect: { x: 900, y: 500, w: 400, h: 120 },
+      dataset: { element: 'shape', shape: 'arrow', stroke: '#111111', strokeWidth: '6', arrowEnd: 'true', ...dataset },
+    }), 'arrow', 2);
+    // Exported at x 200, y 300 with the point at (400, 240); the page moved
+    // the box to (900, 500) and left the attribute alone.
+    expect(arrow({ controlOffset: '200,-60' })).toMatchObject({ x: 900, y: 500, control: { x: 1100, y: 440 } });
+    // A page written before the offset existed still means slide coordinates.
+    expect(arrow({ control: '400,240' })).toMatchObject({ control: { x: 400, y: 240 } });
+  });
+
+  it('round-trips a path drawn with the pen, curves and all', () => {
+    const deck = emptyDeck('Paths');
+    const drawn = pathGeometry([{
+      closed: true,
+      nodes: [
+        { x: 200, y: 300, in: { x: 150, y: 350 }, out: { x: 250, y: 250 } },
+        { x: 500, y: 300 },
+        { x: 350, y: 500, in: { x: 450, y: 520 }, out: { x: 250, y: 480 } },
+      ],
+    }]);
+    const shape = {
+      id: 'pen', type: 'shape' as const, ...drawn, rot: 0, z: 2, opacity: 1, class: [],
+      style: { filter: 'drop-shadow(0px 8px 24px rgba(0, 0, 0, 0.3))' }, shape: 'path' as const,
+      fill: '#c96442', stroke: '#111111', strokeWidth: 3, radius: 0, arrowStart: false, arrowEnd: false,
+    };
+    deck.slides[0].elements = [shape];
+    const html = slideToHtml(parseDeck(deck).slides[0], { w: 1920, h: 1080 });
+    expect(html).toContain(`data-path="${drawn.path}"`);
+    expect(html).toContain(`data-path-size="${drawn.pathSize!.w},${drawn.pathSize!.h}"`);
+    // Drawn by the same builder as the player's: the curves, in the path's own space.
+    expect(html).toContain(`viewBox="0 0 ${drawn.pathSize!.w} ${drawn.pathSize!.h}"`);
+    expect(html).toContain(`<path d="${drawn.path}"`);
+
+    const back = elementFromNode(node({
+      tag: 'div', html: '', rect: { x: drawn.x, y: drawn.y, w: drawn.w, h: drawn.h },
+      dataset: {
+        element: 'shape', shape: 'path', path: drawn.path!, pathSize: `${drawn.pathSize!.w},${drawn.pathSize!.h}`,
+        fill: '#c96442', stroke: '#111111', strokeWidth: '3',
+      },
+    }), 'pen', 2);
+    expect(back).toMatchObject({ shape: 'path', path: drawn.path, pathSize: drawn.pathSize, fill: '#c96442' });
+    expect(parsePath((back as { path: string }).path)).toEqual(parsePath(drawn.path!));
   });
 
   it('round-trips a curly brace and its signed depth', () => {
@@ -664,5 +766,180 @@ describe('deck objects become authored HTML', () => {
     expect(html).toContain('data-slide-id="slide-1"');
     expect(html).toContain('data-canvas="1920x1080"');
     expect(html).toContain('data-morph-duration="1450"');
+  });
+});
+
+describe('the authoring page\'s list rules', () => {
+  // They are cut out of the player's type.css between two markers. Lose a
+  // marker and the cut is empty: every bare list measured on browser
+  // defaults again, silently, a dozen pixels short per item.
+  it('are the player\'s own list rules, rescoped to bare lists', () => {
+    const css = authoringListCss(PLAYER_TYPE_CSS);
+    expect(css).toMatch(/^@layer deckwerk-authoring-lists \{\n@scope \(body\) to/);
+    expect(css).toContain('li {\n  margin: 0.15em 0;');
+    expect(css).toContain('ol > li::before {\n  content: counter(list-item)');
+    expect(css).not.toContain('.text-body ');
+    expect(css).not.toContain('border-collapse');
+  });
+
+  it('go into every page an author opens', () => {
+    const page = slidesToHtml([], { w: 1920, h: 1080 }, { typeCss: PLAYER_TYPE_CSS, blank: 1 });
+    expect(page).toContain(`<style data-authoring-lists>${authoringListCss(PLAYER_TYPE_CSS)}</style>`);
+  });
+});
+
+describe('what a section carries besides its objects', () => {
+  const step = (id: string, type: string, target: string, value: string | null = null, on = 'click', ref: string | null = null) => ({
+    id, trigger: { on, ref, delay: 0 }, action: { type, target, value },
+  });
+
+  it('exports notes, the skip, and the timeline when the attributes cannot say it', () => {
+    const deck = parseDeck({
+      version: 1,
+      slides: [{
+        id: 's', notes: 'Say <this> & that', skipped: true,
+        elements: [
+          { id: 'a', type: 'text', x: 0, y: 0, w: 100, h: 50, z: 1, html: 'A' },
+          { id: 'b', type: 'text', x: 0, y: 60, w: 100, h: 50, z: 2, html: 'B' },
+        ],
+        timeline: [step('t1', 'appear', 'b'), step('t2', 'appear', 'a'), step('t3', 'disappear', 'a', 'dissolve')],
+      }, {
+        id: 'plain', elements: [{ id: 'p', type: 'text', x: 0, y: 0, w: 100, h: 50, html: 'P' }],
+        timeline: [step('p1', 'appear', 'p')],
+      }],
+    });
+    const html = slideToHtml(deck.slides[0], deck.canvas);
+    expect(html).toContain('data-skipped="true"');
+    expect(html).toContain('<aside class="notes">Say &lt;this&gt; &amp; that</aside>');
+    const block = /<script type="application\/deckwerk-timeline">([\s\S]*?)<\/script>/.exec(html);
+    expect(JSON.parse(block![1])).toEqual(deck.slides[0].timeline);
+    // Appearances in paint order and nothing else: the attributes say it all.
+    expect(slideToHtml(deck.slides[1], deck.canvas)).not.toContain('deckwerk-timeline');
+  });
+
+  it('compiles a timeline block with the ids its objects were given, the attributes winning', () => {
+    const deck = parseDeck({ version: 1, slides: [{ id: 'taken', elements: [{ id: 'a', type: 'text', x: 0, y: 0, w: 10, h: 10, html: 'x' }] }] });
+    const [slide] = slidesFromMeasured(deck, [{
+      id: null, name: '', notes: '\n      First line\n        indented\n    ', skipped: true,
+      background: { color: null, image: null }, morphFromPrevious: false,
+      nodes: [
+        node({ elementId: 'a', dataset: { build: 'afterPrev+200' }, html: 'A' }),
+        node({ elementId: 'b', html: 'B' }),
+        node({ elementId: 'c', dataset: { build: 'click', buildOrder: '1' }, html: 'C' }),
+      ],
+      timeline: JSON.stringify([
+        step('t1', 'appear', 'b'), step('t2', 'appear', 'a', 'byParagraph'),
+        step('t3', 'disappear', 'a', null, 'mediaEnd', 'b'),
+      ]),
+    }]);
+    const a = slide.elements[0].id;
+    // `a` is taken in this deck: renamed, and every step follows it.
+    expect(a).not.toBe('a');
+    expect(slide.notes).toBe('First line\n  indented');
+    expect(slide.skipped).toBe(true);
+    expect(slide.timeline.map((entry) => [entry.action.type, entry.action.target, entry.action.value, entry.trigger.on, entry.trigger.ref]))
+      .toEqual([
+        // data-build-order="1" puts c's appearance first.
+        ['appear', 'c', null, 'click', null],
+        // b's data-build is gone from the page: its appearance goes.
+        // a's attribute states its trigger; the block keeps its by-paragraph reveal.
+        ['appear', a, 'byParagraph', 'afterPrev', null],
+        ['disappear', a, null, 'mediaEnd', 'b'],
+      ]);
+  });
+
+  it('refuses a timeline block that is not a timeline', () => {
+    const measured = {
+      id: null, name: '', notes: '', background: { color: null, image: null }, morphFromPrevious: false, nodes: [node()],
+    };
+    expect(() => slidesFromMeasured(emptyDeck('x'), [{ ...measured, timeline: '[{' }])).toThrow(/not valid JSON/);
+    expect(() => slidesFromMeasured(emptyDeck('x'), [{ ...measured, timeline: '[{"id":"t"}]' }])).toThrow(/Entry 1 .* not a timeline entry/);
+  });
+});
+
+describe('an exported range synced back', () => {
+  /** A deck of `count` one-line slides, `s1` … `sN`. */
+  function deckOf(count: number): Deck {
+    return parseDeck({
+      version: 1,
+      slides: Array.from({ length: count }, (_, index) => ({
+        id: `s${index + 1}`,
+        name: `Slide ${index + 1}`,
+        elements: [{
+          id: `s${index + 1}-title`, type: 'text', x: 100, y: 100, w: 800, h: 120, html: `Slide ${index + 1}`,
+        }],
+      })),
+    });
+  }
+  const edited = (deck: Deck, id: string): Slide => {
+    const slide = structuredClone(deck.slides.find((candidate) => candidate.id === id)!);
+    (slide.elements[0] as { html: string }).html = `${id}, edited`;
+    return slide;
+  };
+  const fresh = (id: string): Slide => parseDeck({
+    version: 1, slides: [{ id, elements: [{ id: `${id}-title`, type: 'text', x: 0, y: 0, w: 100, h: 50, html: id }] }],
+  }).slides[0];
+  const sync = (deck: Deck, slides: Slide[], scope: string[]) => {
+    const operations = htmlSyncOperations(deck, slides, scope, null);
+    const next = applyAgentOperations(deck, operations);
+    return { summary: htmlSyncSummary(operations), order: next.slides.map((slide) => slide.id) };
+  };
+
+  // Bug #21: a non-contiguous export, edited only inside its sections, moved
+  // every slide it named to sit right after the first one, and reported a
+  // move for every slide in the deck.
+  it('replaces the slides of a scattered export in place, moving nothing', () => {
+    const deck = deckOf(100);
+    const scope = ['s2', 's39', 's77', 's91'];
+    const { summary, order } = sync(deck, scope.map((id) => edited(deck, id)), scope);
+    expect(summary.replaced).toEqual(scope);
+    expect(summary.moved).toBe(0);
+    expect(order).toEqual(deck.slides.map((slide) => slide.id));
+  });
+
+  it('reorders a scattered export only among its own places, counting only what moved', () => {
+    const deck = deckOf(100);
+    const scope = ['s2', 's39', 's77'];
+    const { summary, order } = sync(deck, [edited(deck, 's77'), edited(deck, 's2'), edited(deck, 's39')], scope);
+    const expected = deck.slides.map((slide) => slide.id);
+    expected[1] = 's77';
+    expected[38] = 's2';
+    expected[76] = 's39';
+    expect(order).toEqual(expected);
+    expect(summary.moved).toBeGreaterThan(0);
+    expect(summary.moved).toBeLessThanOrEqual(3);
+  });
+
+  it('puts a new section of a scattered export after the slide of the section before it', () => {
+    const deck = deckOf(60);
+    const scope = ['s2', 's39', 's50'];
+    const { summary, order } = sync(deck, [
+      fresh('lead'), edited(deck, 's2'), edited(deck, 's39'), fresh('after-39'), edited(deck, 's50'), fresh('tail'),
+    ], scope);
+    const expected = deck.slides.map((slide) => slide.id);
+    expected.splice(expected.indexOf('s50') + 1, 0, 'tail');
+    expected.splice(expected.indexOf('s39') + 1, 0, 'after-39');
+    expected.splice(expected.indexOf('s2'), 0, 'lead');
+    expect(order).toEqual(expected);
+    expect([...summary.inserted].sort()).toEqual(['after-39', 'lead', 'tail']);
+    expect(summary.moved).toBe(0);
+  });
+
+  it('deletes a slide a scattered export dropped and leaves the others where they are', () => {
+    const deck = deckOf(30);
+    const scope = ['s3', 's10', 's20'];
+    const { summary, order } = sync(deck, [edited(deck, 's3'), edited(deck, 's20')], scope);
+    expect(summary.deleted).toEqual(['s10']);
+    expect(summary.moved).toBe(0);
+    expect(order).toEqual(deck.slides.map((slide) => slide.id).filter((id) => id !== 's10'));
+  });
+
+  it('still treats a contiguous export as one block, counting only the slides that moved', () => {
+    const deck = deckOf(10);
+    const scope = ['s4', 's5', 's6'];
+    const { summary, order } = sync(deck, [edited(deck, 's6'), fresh('new'), edited(deck, 's4')], scope);
+    expect(order).toEqual(['s1', 's2', 's3', 's6', 'new', 's4', 's7', 's8', 's9', 's10']);
+    expect(summary.deleted).toEqual(['s5']);
+    expect(summary.moved).toBe(1);
   });
 });

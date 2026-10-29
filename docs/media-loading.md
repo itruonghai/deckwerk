@@ -98,9 +98,11 @@ never opens a media pipeline for a thumbnail. This is not a refinement: in
 Sept 2026 the create-and-tear-down churn of thumbnail pipelines on an
 81-video deck hit a lock inversion between Chromium's main and media threads
 and froze the editor window for good (`docs/confirmed-bugs.md`). The browser
-collab client has no provider and keeps the in-page capture; so does any
-element the provider cannot serve, whose source is restored and gated as
-before. Recovery (`previewFrameRecovery.ts`) leaves a pending element alone.
+collab client's provider is the server: `/api/video-still` cuts the frame with
+ffmpeg (cached beside the renditions), so a thumbnail costs one small JPEG
+rather than the clip read as far as its in-point — 12 MB of a screen recording
+shown from 10 s in. Any element the provider cannot serve keeps the in-page
+capture, its source restored and gated as before. Recovery (`previewFrameRecovery.ts`) leaves a pending element alone.
 
 The editor canvas and the Player keep real `<video>` elements: they play. A
 capture path (`holdFrame`) is skipped, and if a frame cannot be read (a tainted
@@ -133,7 +135,13 @@ The rules that keep it honest:
 - **Serving never waits.** `ready()` is synchronous and returns null rather
   than blocking; a slide streaming the original beats a slide waiting for
   ffmpeg. The request that missed queues the transcode for next time.
-- **One at a time.** A presenting machine is also the server.
+- **One at a time, a requested clip first.** A presenting machine is also
+  the server, so encodes run one at a time, in slide order. A clip somebody
+  asks for while it waits (it is on screen, someone pressed play) goes ahead
+  of everything still waiting, so nobody waits behind the other 29 clips of
+  a fresh import. The probe that decides whether a clip needs encoding runs
+  in its turn too: run ahead of the queue, probes racing each other decided
+  its order.
 - **Pending means revalidate.** While a rendition is merely intended, the
   original is served `public, no-cache` even under a content-hashed name: an
   immutable copy of the original would never be asked about again, and the
@@ -146,25 +154,47 @@ The rules that keep it honest:
   Chromium failed it with `PIPELINE_ERROR_DECODE`. The welcome therefore
   carries `mediaVariants` (`o<key>` original, `r<key>` rendition, per deck
   src), a `media` message announces each rendition as it lands, and the
-  browser clients pin the variant into every video URL (`?v=`;
-  `src/renderer/collab/mediaVariants.ts`). A pinned URL is answered with
-  exactly that variant and cached immutably; a video the client has not been
-  told about yet (just uploaded) pins a bare `o` and gets the original,
-  revalidated. Unpinned URLs (agents, print, older clients) behave as above.
-- **Keyed by name, size and mtime**, not by path, so renaming a deck or a
-  folder does not throw away an hour of encoding.
+  browser clients ask for exactly that variant
+  (`src/renderer/collab/mediaVariants.ts`): a keyed variant is the URL
+  `/media/<o|r><key>.<ext>`, answered with exactly those bytes and cached
+  immutably. A video the client has not been told about yet (just uploaded)
+  pins a bare `o` on its deck URL and gets the original, revalidated. A deck
+  URL with a keyed `?v=` (a tab older than `/media`) is redirected there
+  permanently. Unpinned URLs (agents, print) behave as above. A change that
+  brings a clip into a deck is preceded by a `media` message with its
+  variant, and an upload's answer carries it, so no client builds an element
+  on a URL it will later abandon (orphaning what it downloaded under it).
+- **Keyed by content.** A talk starts as a copy of the last one; in Oct 2026
+  one 125 MB recording sat in five decks and was encoded once per copy. The
+  key is the start of the file's SHA-256, so one encode, one rendition and
+  one `/media` URL serve every copy, and a copy of a deck costs a browser
+  nothing it already has. Hashing never happens on the serving path: a file
+  is hashed when its deck opens (or it arrives) and the key is remembered
+  under its name, size and mtime in `content-keys.json` beside the
+  renditions, so a renamed deck costs nothing and a restart re-reads the
+  index. What an encode concluded survives a restart too: a rendition is a
+  file, and "none worth having" leaves `<key>.passed`. With access control
+  on, `/media` serves only someone who may see a deck holding that content.
 - **Never bigger than the source.** A rendition that came out larger is
   discarded and the original served; failure of any kind falls back to the
   original.
-- **Pruned after 90 days.** Every edited or deleted asset leaves its rendition
-  behind, and a server hosting years of talks would keep all of them. Losing
-  one that is still wanted costs a background re-encode and nothing else.
+- **Kept while any deck holds the clip.** Every edited or deleted asset
+  leaves its rendition behind, so what no deck folder holds any more is
+  pruned after 90 days (a deck in the trash may come back). A rendition of
+  content some deck still holds is never pruned, however long it went unasked
+  for: a talk not opened for a year must not stream originals the day it is
+  given again.
 
-Renditions are built when a deck is opened (in slide order, so the front of
-the talk is ready first) and on demand when an asset is requested. Neither is
-the right moment to discover a gigabyte of screen recordings, so there is also
-`npm run prepare:media -- <deck-or-decks-root>`, which does the whole job up
-front — what you want the day before a talk.
+Renditions are built as soon as a video reaches the server — a drop, paste or
+upload into the editor, a paste from another deck, a Keynote, PowerPoint or
+deck-archive import, an agent's mirror upload, an edit that brings a clip into
+a deck (which covers HTML an agent compiles) — and everything already on disk
+is swept once when the server starts (most recently edited deck first), so
+the first person to open a deck is not the one who streams its originals.
+Opening a deck and asking for a clip still queue it too. The sweep reads the
+deck folders, not deck.json, so a clip a deck holds but no longer shows is
+prepared and kept as well; the cost is one encode per content, once.
+`npm run prepare:media -- <deck-or-decks-root>` does the same up front.
 
 Measured after, cold, on the same 8 Mbit/s link: the 48 MB clip starts in
 0.8 s and the 51 MB one in 0.6 s. At 3 Mbit/s they start in under 2 s. The
@@ -302,13 +332,164 @@ letting it start immediately is the difference between clicking Present and
 seeing the opening clip, and clicking Present and watching a black rectangle
 while bytes for a slide nobody has reached yet come down the same pipe.
 
+### Safari: the browser presentation plays clips from memory
+
+Everything above assumes the browser reuses media bytes it already has, and
+Chromium does. Safari does not. Its media loader (AVFoundation) reads a clip
+in range requests of its own and keeps nothing for the next element, so the
+HTTP-cache warm and the pooled elements did nothing for it: every visit to a
+slide downloaded that slide's clips again from byte zero. The server's asset
+log of the Oct 2026 TRI site visit shows it. A slide with four clips (31 MB)
+was fetched again on every pass, over a link that delivered about 7 MB/s.
+The clips spun, then showed without playing, until the presenter stepped
+back and forward. None of the tests caught it because every browser tier is
+Chromium.
+
+So the browser presentation (`src/renderer/collab/present.ts`) hands the
+Player a `MediaBlobCache` (`src/renderer/player/mediaBlobCache.ts`). It
+downloads each of the talk's clips once, whole, one at a time, and the Player
+renders a clip's `blob:` URL instead of its network URL once the file is in
+memory. Order: the next two slides, then the slide on screen, then the rest of
+the talk ahead, then what lies behind, nearest first, with the talk's pictures
+woven in ahead of the clips they would otherwise wait behind (see "Pictures"
+below). The cache holds (starts no new clip) from each slide change until the
+visible slide can paint, exactly like the lookahead. The lookahead decodes an upcoming clip only once
+its blob has landed, and a slide the presenter reaches while its clip is
+still on its way takes no source until that download ends
+(`awaitClipsOnTheirWayIntoMemory`), so a clip is never downloaded twice.
+That second rule is not about Safari: two transfers of one file at once is
+what Chromium's HTTP cache handles worst. It lets a range request (the media
+stack's `bytes=0-`) wait only about 25 ms for the transfer already writing the
+entry, then sends it past the cache, and the whole clip crossed the wire again
+whenever the talk outran the download (mediaTransferBudgetBrowser failed
+on about half of CI runs before Oct 2026). The budget is 1 GB.
+Past it, the cache drops the files the talk reaches last, but never one an
+element still reads. A file it cannot hold, or that fails twice, streams the
+old way.
+
+### Safari: the editor reads clips from memory too
+
+The editor canvas had the same problem, worse, because it rebuilds and
+re-points `<video>` elements all the time: a slide change, an edit, a
+collaborator's edit, coming back from presenting. In Safari each of those
+opened the clip again, a `bytes=0-1` probe and then the whole file from byte
+zero, often twice in parallel and abandoned partway. On the media transfer
+budget suite (Oct 2026) it failed ten of eighteen budgets, and a clip still
+waiting for its streaming version pulled up to its whole 30 MB original to
+show one paused frame.
+
+So in a browser whose media stack keeps no bytes between elements (every
+WebKit one: `mediaStackReusesBytes` in `src/renderer/player/videoMemory.ts`)
+the collab editor installs a `VideoMemory` (`src/renderer/collab/
+editorVideoMemory.ts`), and `renderVideo` asks it what each canvas element
+should read:
+
+- **memory**: the whole file, fetched once with `fetch` (a `MediaBlobCache`,
+  one file at a time, most recently shown first) and read as a `blob:` URL by
+  every element built for it afterwards. Until the file lands the element has
+  no source and shows the server-cut still (`/api/video-still`) as its
+  poster. `fetch` goes through the HTTP cache, which Safari does keep for an
+  immutable `/media` URL, so a reload or a copy of the deck fetches nothing.
+  A file over 64 MB streams instead: holding it would cost the whole file to
+  show a paused frame.
+- **still**: the clip's streaming version is still being prepared. The
+  server says which clips are waiting (`pendingMedia` in the welcome,
+  `pending` in each `media` message, sent again when an encode finishes,
+  is skipped or fails), and such a clip shows its still and reads nothing
+  until the version exists, when the canvas rebuilds it
+  (`refreshMediaSources`). Play or scrub it before then and it streams the
+  original (`startVideoSource`).
+- **network**: everything else, as in Chromium.
+
+Elements keep their network URL in `data-network-src` (`videoNetworkSrc`), so
+presentation keys, pooling and the render-invariant checker see the same
+element whatever it reads. The presentation the editor embeds borrows the
+editor's blobs (`MediaBlobCache`'s `borrow`), so presenting downloads nothing
+the editor already has.
+
+Two smaller rules came out of the same session:
+
+- **A failed element is never reused.** A media element never recovers from
+  an error by itself, and the pool used to adopt one that had a frame on
+  screen, so a clip that lost its connection once stayed dead on every visit.
+- **A play-retry budget that runs out mid-load waits for `canplay`.** The
+  budget exists for a browser that keeps pausing a clip it could play. A clip
+  still loading is not that case, and giving up on it left the clip frozen
+  once its bytes arrived.
+
+### Pictures: downloaded once, then never asked about again
+
+Presenting a hosted talk in Oct 2026, every slide appeared at once and its
+photos seconds later: 6.8 s on one slide, 15.4 s for one 4.7 MB photo. The
+link was not the only reason. The presentation spent it on the wrong things
+first: the blob cache downloaded the next slides' clips (one `fetch` open for
+tens of seconds) while the photos waited behind it; photos were looked for
+only two slides ahead, four at most, and only once the visible slide had
+painted; and every photo the editor had already loaded was served
+`public, no-cache`, so each reshow was a revalidation, a 304 that queued
+behind the clip on the same connection (one took 4 s to say "unchanged").
+
+Three rules now:
+
+- **A picture has one URL, for good.** Images, video posters, web posters and
+  slide backgrounds get a content key like clips (`RenditionStore.variant`
+  answers `o<key>` for a picture), announced in `mediaVariants` with the
+  clips', and clients ask for `/media/o<key>.<ext>`, served immutable and
+  under the same access rule. A deck copy shares it; a reshow, a reload or a
+  new presentation in the same browser asks the server nothing. A picture
+  brought in by an edit is announced before the edit, as a clip is
+  (`bringsMedia`).
+- **The presentation holds the talk's pictures in memory** (the same
+  `MediaBlobCache` that holds its clips), so a slide renders them as `blob:`
+  URLs: no request at all, not even to the HTTP cache. A picture the slide
+  on screen needs that is not in memory yet waits for the cache's transfer
+  (`awaitImagesOnTheirWayIntoMemory`) rather than starting a second one. It
+  is rendered with no `src` at all (`deferImageSrc` in render.ts): WebKit
+  starts an `<img>`'s request the moment `src` is assigned, detached or not,
+  so assigning the URL and removing it again sent the first slide's photos
+  twice in Safari.
+- **One order for the link** (`Player.mediaOrder`): the pictures of the slide
+  on screen and the next four slides; the clips of the next two slides and of
+  the slide on screen; every other picture of the talk, ahead then behind;
+  then the remaining clips. Up to four pictures download at once, and they
+  are not held while the visible slide's clips load. A clip downloads only
+  once every picture ranked above it is in memory, and a clip already
+  downloading when such a picture goes missing (the talk moved on) steps
+  aside: the transfer stops, the bytes it had are kept, and it resumes with a
+  `Range` and `If-Range` request once the pictures are in. What the slide on
+  screen waits for (`prioritize`) goes first and is never set aside.
+
+Measured with `imgbench` against a local server through Chrome's network
+emulation at 30 ms / 10 Mbit/s, on a 12-slide deck of 62 photos and four
+19 MB clips: before, four slides showed their photos late (worst +3.0 s) and
+the presentation sent 61 revalidations; after, one did (a 3.4 MB photo the
+benchmark reached 2.5 s into the show) and the presentation sent nothing to
+the server.
+
 Images are loaded and decoded as `<img>` elements, then the decoded element
 is adopted into the slide when it appears. This distinction
 matters for large JPEGs: cached bytes can still paint as a thin band of decoded
 scanlines, while an adopted decoded bitmap appears atomically. Decodes run
-sequentially and stop after four images or 48 megapixels. Only the active
+sequentially and stop after 40 images or 48 megapixels. Only the active
 lookahead's decoded images remain resident, so a long deck does not retain a
-deck's worth of 4K/6K frames or decode a whole image wall concurrently.
+deck's worth of 4K/6K frames or decode a whole image wall concurrently. With
+the presentation's blob cache, the lookahead decodes pictures already in
+memory as soon as the slide changes (decoding costs the link nothing) and
+again as each lands, rather than after the visible slide paints. The decoded
+pictures of the slides just shown are kept too, under the same 48 megapixel
+bound, most recent first (`shownImages`), so stepping back or jumping home
+shows them in the slide's first frame. Two Safari findings shape this: it
+can take seconds to resolve `decode()` for an image that is not in the
+document, so the lookahead waits on one decode for at most 250 ms after the
+bytes are in (`decodedOrLoaded`) before starting the next, and an image
+whose bytes are all in is never hidden waiting for its decode
+(`revealImagesWhenDecoded`): only a partly loaded image can paint as a strip.
+
+Once the presentation holds the whole talk (`MediaBlobCache.holdsAll`, read
+through `window.deckwerkPresentationMemory`), it needs nothing from the
+server: losing the connection leaves the show running from memory, forward,
+back and jumping, clips playing, while the connection notice says the link is
+gone.
 
 The editor canvas applies the same exact-node rule to still images, with a
 tighter budget: during idle time it decodes images from only the next
@@ -316,6 +497,102 @@ presentable slide. Navigation adopts that in-flight or decoded `<img>` rather
 than starting a second decode on the keypress path. Changing direction drops
 stale lookahead nodes immediately, so an image-heavy editing session never
 accumulates decoded bitmaps from the rest of the deck.
+
+### Offline: the talk goes on when the server goes away
+
+A talk is given in a lecture hall whose wifi fails, from a laptop whose
+server (the lab machine, over the tailnet) is suddenly out of reach. The
+browser editor therefore keeps an offline copy of the deck it has open, and
+presenting works from it, even pressing Present after the connection has
+dropped, and so does reloading the editor.
+
+- **The shell.** A service worker (`src/renderer/collab/sw.ts`, emitted as
+  `sw.js` at the root of the client build) precaches the pages, the hashed
+  bundles and the woff2 fonts, from a list the build writes into it
+  (`vite.collab.config.ts`). The editor page is network-first;
+  `present.html` comes from the shell (the editor that opens it runs that
+  build). The worker is registered once the editor has gone quiet after
+  opening a deck, so a first visit spends the link on the slide being
+  shown, and only in a secure context (https, or localhost): a LAN joiner on
+  plain http gets no copy. An install the connection cut short is retried
+  when the editor reconnects.
+- **A server that does not answer.** A stopped server refuses at once; one
+  behind a route that dropped never answers, and every request hangs. A page
+  or `/api/config` waits three seconds for the server, then the kept copy
+  answers, and the worker remembers for fifteen seconds that the server did
+  not answer, so what follows (the page's config, its files) is answered at
+  once. Kept answers carry `x-deckwerk-kept`, and an editor whose config came
+  from the copy opens its deck from the copy straight away instead of
+  waiting out a socket handshake (which itself gives up after ten seconds).
+- **The files.** `OfflineCopy` (`src/renderer/collab/offlineCopy.ts`)
+  downloads every file the deck shows into Cache Storage, which persists
+  where the HTTP cache need not, in the presentation's order
+  (`talkMediaOrder`, the same function the Player's blob cache follows)
+  counted outward from the slide the editor is on, then skipped slides, web
+  pages and layout masters. One file at a time in the whole browser (a Web
+  Lock), and only while the editor has been quiet for a second: a canvas
+  video or picture still loading, a rail thumbnail in the load gate, the
+  Safari video memory fetching, or a presentation running all hold it. A
+  clip already downloading stops reading between chunks while the editor is
+  busy. Whatever wants a file the copy is downloading waits for it
+  (`settled`, wired into the presentation's and the video memory's blob
+  caches) instead of downloading it beside it. Chromium's HTTP cache keeps
+  what a `<video>` read in pieces, so clips are asked for as `bytes=0-`,
+  which it assembles from those pieces; in Safari a clip the editor holds
+  in memory is copied from there. A download that gets no answer is the
+  connection's fault, not the file's: the copy waits for the server rather
+  than giving the file up.
+- **What is kept carries its URL.** A download is written to a staging cache,
+  then read back through the worker and kept as that answer. A response the
+  page built itself has no URL, and Chromium's media stack refuses one for a
+  `<video>`; Chromium's video requests get the kept response whole (a 200,
+  which it reads through to seek), Safari's get real byte ranges, which its
+  media stack needs (`answerFromKept`).
+- **A page's video never switches source.** Chromium keeps one data source
+  per URL in a page, shared by every `<video>` on it; a clip some of whose
+  ranges came from the network and later ones from the worker fails ("data
+  source error") in every element showing it. So the worker answers a video
+  request from the copy only for a page it controlled from birth (the
+  presentation, an editor opened or reloaded since the worker was
+  installed) and that has not streamed that clip from the network, or when
+  the server is down. Pictures and the presentation's blob cache read whole
+  files and are answered from the copy whenever it has them. A file not in
+  the copy is never touched: the request goes to the network as if there
+  were no worker.
+- **The deck** is kept as a snapshot (deck, theme, media variants, pending
+  clips), written as the deck opens and within two seconds of a change (a
+  save already due is never pushed back), and at once when the page is
+  hidden or closed. An editor opened while the server is unreachable shows
+  it, read-only until the first welcome replaces it: anything edited in it
+  would be discarded when the server answers, as edits made during any
+  disconnection are. The store refuses every local edit and says why
+  (`EditorStore.setEditLock`), the canvas and side panels are `inert`, the
+  rail keeps navigating without its edit buttons, and Present works.
+- **Bounded.** A file goes in only while it fits 80% of the origin's quota
+  (`navigator.storage.estimate`), and the copy asks for persistent storage
+  (`navigator.storage.persist`). An index records each deck opened and its
+  files; past eight decks, or ninety days unopened, a deck's snapshot goes,
+  and any file no deck in the index holds is deleted. A deck the server
+  refuses this person (close 4003) or no longer has is forgotten at once.
+  `/media` is the same access-controlled route either way: the copy holds
+  only what this person was served.
+- **Pending clips wait.** A clip whose streaming version is still being
+  prepared is not downloaded (its original may be many times the size); it
+  counts as a file left until the version exists.
+
+The status line says "Downloading for offline: n files left", then
+"Available offline" (or why not: no room, files that kept failing, the
+server gone mid-copy). Present without a server is allowed once the copy is
+complete (shell, deck, every file), and refused with what the copy lacks
+otherwise. In the presentation, the disconnect pill fades after a few
+seconds rather than staying on the projector for the rest of the talk.
+
+Measured through an SSH forward to the lab server (Oct 2026): a 107-slide
+talk (184 MB once its clips have streaming versions) is available offline
+28 s after it opens in Chrome, 25 s in Safari; a 166-slide talk (256 MB) in
+35 s and 45 s. A deck too large for the origin's quota says so ("Not enough
+storage to keep 23 files offline") and Present without the server is
+refused with that reason.
 
 ## Regression guards
 
@@ -330,6 +607,26 @@ accumulates decoded bitmaps from the rest of the deck.
   not, the 1080p cap, one transcode shared between racing callers, the cache
   key surviving a rename but not an edit, and the synchronous ready/pending
   answers the serving path depends on.
+- `test/mediaTransferBudgetBrowser.test.ts` — what a whole editing session
+  costs on the wire, measured by a throttled link in front of the server
+  (`test/support/throttledLink.ts`): no byte of a file arrives twice, reloads
+  and deck copies included; browsing again, editing, a collaborator's edit and
+  coming back from presenting re-download and revalidate nothing; a file keeps
+  one URL; a clip
+  waiting for its streaming version fetches only its frame, and once the
+  version exists costs at most one version more. Real Safari runs the same
+  budgets on a Mac with `RUN_SAFARI_MEDIA_BUDGET=1`.
+- `test/editorVideoMemory.test.ts` — which browsers read clips from memory,
+  and what a canvas element reads in each mode: a blob, nothing but the
+  still until the file lands, the network once the memory gives a file up;
+  presentation keys that match a network render; the cache's size limit and
+  borrowing; the pending set.
+- `test/mediaIngest.test.ts` — every way a video reaches the server starts its
+  streaming encode at once; videos already on disk are swept at startup; one
+  encode serves every copy of the same bytes and survives restarts; a version
+  is kept while any deck uses its clip; a requested clip jumps the queue.
+  Budgets not met yet are `it.fails` under a PENDING note naming the change
+  that meets them.
 - `test/morph.test.ts` — the Morph panel's preview surfaces survive a
   re-render, and adopt their decoded elements when an edit rebuilds them.
 - `test/previewStillsBrowser.test.ts` — the real editor over a throttled link:
@@ -346,6 +643,56 @@ accumulates decoded bitmaps from the rest of the deck.
   adopts, opens one element for a clip two slides share, respects skipped
   slides and the decode budget, and gives up a decode the deck navigated away
   from.
+- `test/mediaTransferBudgetBrowser.test.ts`, "presenting a talk of photos
+  and clips" — over the throttled link, each slide's photos are on screen in
+  the frame the slide appears once the background fetch has reached it,
+  moving back, jumping home and presenting again included; each photo
+  crosses the wire once under one URL, and nothing is asked about it again;
+  and once the presentation holds the talk, cutting the link (`cut()` on the
+  throttled link: open connections dropped, new ones never answered) leaves
+  every slide's photos in its first frame and every clip playing, with no
+  media request attempted.
+- `test/mediaTransferBudgetBrowser.test.ts`, "presenting after the server
+  has gone" — the editor opens the talk of photos and clips, says it is
+  available offline, the server and the link in front of it stop, and
+  Present still works: forward, back and jumps (a Speaker View's `goTo`),
+  every photo in its slide's first frame, every clip playing, no media
+  element failing and nothing the worker could not answer; then a reload
+  of the editor shows the deck. Chromium in CI, Safari with
+  `RUN_SAFARI_MEDIA_BUDGET=1`.
+- `test/offlinePresentScenariosBrowser.test.ts` (long tier) — the server lost
+  every way (refused, a black hole, the WebSocket alone, the process
+  stopped and started) at every moment (before the copy is complete, after
+  it, mid-presentation), then the whole talk walked forward, back and by
+  jumps, the editor reloaded without the server, and the session reconnected;
+  small, medium, `OFFLINE_LARGE=1` and `OFFLINE_REAL_DECKS=<folders>`.
+- `test/offlinePresentFuzzBrowser.test.ts` — a seeded walk of open, wait,
+  lose the link (refused, black hole, WebSocket), restore it, present, step,
+  jump, reload, add a picture online and offline, and switch decks, checked
+  against a model of what must be on screen (`OFFLINE_FUZZ_SEEDS`,
+  `OFFLINE_FUZZ_STEPS`, `OFFLINE_FUZZ_BROWSERS`; nightly with
+  `npm run test:offline:fuzz`). `dev/offline/` drives the same walk against
+  any origin (an SSH-forwarded server behind a cuttable link).
+- `test/offlineCopy.test.ts` — the copy's order, its quiet periods, clips
+  pausing for the editor and going at once for a waiter, pending clips,
+  quota and failures in the status line, whole files kept from ranges, the
+  snapshot, eviction by deck; and the worker's range answers.
+- `test/presentVideosFromMemory.test.ts` — pictures before the clips ranked
+  below them, several at once and never held; a clip set aside for a picture
+  and resumed with a range request; a clip the slide waits for never set
+  aside; the Player showing pictures from memory. Also the blob cache's order, hold,
+  budget and fallbacks, and the Player with it: a revisited slide fetches
+  nothing, an upcoming clip is decoded from memory rather than downloaded
+  twice, a slide reached while its clip is still on its way into memory
+  waits for that download instead of opening a second one, a failed element
+  is not reused, and a clip whose retries ran out mid-load starts once it can
+  play.
+- `test/renderInvariants.test.ts` — besides the invariant itself: the check
+  loads no media. Test builds run it after every in-place canvas patch; its
+  fresh render and its copies used to be live `<video>` elements that fetched
+  the slide's clips beside the canvas's own, and the resulting pile-up of
+  concurrent range requests made Chromium doom the clip's cache entry, so the
+  next viewer downloaded every byte again.
 - `test/editorImageWarmup.test.ts` — the editor decodes a next-slide image once
   and adopts that exact node on navigation.
 - `test/canvasVideoReuseBrowser.test.ts` — the same rule through the real rail

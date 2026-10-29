@@ -13,9 +13,16 @@ export interface ConfirmDialogOptions {
   title: string;
   description: string;
   confirmLabel: string;
-  cancelLabel?: string;
+  /** `null` leaves only the confirm button: a message to acknowledge, not a question. */
+  cancelLabel?: string | null;
+  /** Things the action touches, each named on its own line in a scrolling list. */
+  items?: string[];
   /** Paint the confirm button as destructive (`button.danger`). */
   destructive?: boolean;
+  /** More content under the description, such as release notes. */
+  body?: HTMLElement;
+  /** Extra class names for the dialog panel, to size or style one kind of dialog. */
+  className?: string;
   returnFocus?: HTMLElement | null;
 }
 
@@ -27,7 +34,7 @@ export function showConfirmDialog(options: ConfirmDialogOptions): Promise<boolea
     overlay.className = 'workflow-overlay';
 
     const dialog = document.createElement('section');
-    dialog.className = 'workflow-dialog confirm-dialog';
+    dialog.className = `workflow-dialog confirm-dialog${options.className ? ` ${options.className}` : ''}`;
     dialog.setAttribute('role', 'alertdialog');
     dialog.setAttribute('aria-modal', 'true');
     dialog.setAttribute('aria-labelledby', 'confirm-dialog-title');
@@ -50,7 +57,8 @@ export function showConfirmDialog(options: ConfirmDialogOptions): Promise<boolea
     confirm.type = 'button';
     confirm.className = options.destructive ? 'danger' : 'primary';
     confirm.textContent = options.confirmLabel;
-    actions.append(cancel, confirm);
+    if (options.cancelLabel === null) actions.append(confirm);
+    else actions.append(cancel, confirm);
 
     let finished = false;
     const finish = (confirmed: boolean): void => {
@@ -83,7 +91,19 @@ export function showConfirmDialog(options: ConfirmDialogOptions): Promise<boolea
       if (event.key !== 'Tab') event.stopPropagation();
     });
 
-    dialog.append(title, description, actions);
+    dialog.append(title, description);
+    if (options.body) dialog.appendChild(options.body);
+    if (options.items && options.items.length > 0) {
+      const list = document.createElement('ul');
+      list.className = 'confirm-dialog-items';
+      for (const item of options.items) {
+        const row = document.createElement('li');
+        row.textContent = item;
+        list.appendChild(row);
+      }
+      dialog.appendChild(list);
+    }
+    dialog.append(actions);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
     confirm.focus();

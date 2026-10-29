@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, stat, utimes } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   RenditionStore,
+  contentKeyOfFile,
   isVideoAsset,
   pruneRenditions,
   renditionPath,
@@ -110,19 +111,43 @@ describe.skipIf(!ffmpeg)('streaming renditions', () => {
     expect(starts).toHaveLength(1);
   }, 120_000);
 
-  it('keys the cache by name, size and mtime, not by path', async () => {
+  it('keys the cache by content: a copy, however named, shares the encode', async () => {
     const source = await clip('keyed.mp4', ['-b:v', '40M']);
-    const info = await stat(source);
-    const moved = join(work, 'elsewhere', 'keyed.mp4');
+    const starts: string[] = [];
+    const store = new RenditionStore({ cacheDir, onProgress: (e) => { if (e.status === 'started') starts.push(e.source); } });
+    const rendition = await store.ensure(source);
+    expect(rendition).not.toBeNull();
 
-    // Renaming a deck rewrites every asset path under it, and the deck about
-    // to be presented is exactly the one someone just filed somewhere tidier.
-    expect(renditionPath(moved, info.size, info.mtimeMs, cacheDir))
-      .toBe(renditionPath(source, info.size, info.mtimeMs, cacheDir));
+    // A talk starts as a copy of the last one: same bytes, another deck,
+    // another name, a later mtime. One encode serves both.
+    await mkdir(join(work, 'next-talk'), { recursive: true });
+    const copy = join(work, 'next-talk', 'renamed.mp4');
+    await copyFile(source, copy);
+    const later = new Date(Date.now() + 60_000);
+    await utimes(copy, later, later);
+    expect(await store.ensure(copy)).toBe(rendition);
+    expect(starts).toEqual([source]);
+    expect(await contentKeyOfFile(copy)).toBe(await contentKeyOfFile(source));
+
     // A changed file is a different clip, whatever it is called.
-    expect(renditionPath(source, info.size, info.mtimeMs + 1000, cacheDir))
-      .not.toBe(renditionPath(source, info.size, info.mtimeMs, cacheDir));
-  }, 60_000);
+    await appendFile(copy, Buffer.alloc(16));
+    expect(await contentKeyOfFile(copy)).not.toBe(await contentKeyOfFile(source));
+  }, 120_000);
+
+  it('remembers what an encode concluded across a restart', async () => {
+    const big = await clip('kept.mp4', ['-b:v', '40M']);
+    const modest = await clip('modest-again.mp4', ['-b:v', '5M'], { size: '1280x720', seconds: 16 });
+    const first = new RenditionStore({ cacheDir });
+    expect(await first.ensure(big)).not.toBeNull();
+    expect(await first.ensure(modest)).toBeNull();
+
+    // A new process: neither clip is probed or encoded again.
+    const events: string[] = [];
+    const second = new RenditionStore({ cacheDir, onProgress: (e) => events.push(`${e.status} ${e.source}`) });
+    expect(await second.ensure(big)).toBe(renditionPath(await contentKeyOfFile(big), cacheDir));
+    expect(await second.ensure(modest)).toBeNull();
+    expect(events).toEqual([]);
+  }, 180_000);
 
   it('reports a ready rendition synchronously, and a pending one as pending', async () => {
     const source = await clip('ready.mp4', ['-b:v', '40M']);
@@ -153,6 +178,20 @@ describe.skipIf(!ffmpeg)('streaming renditions', () => {
     expect(info.size).toBeLessThan(8 * 1024 * 1024);
     expect(store.pending(source, info.size, info.mtimeMs)).toBe(false);
     expect(await store.ensure(source)).toBeNull();
+  }, 60_000);
+
+  it('pins a small clip to its exact bytes, so browsers can cache it', async () => {
+    // A small clip once had no variant, so its URL pinned a bare `o` and was
+    // served `no-cache`; Safari refetched it on every load of a looping slide.
+    const source = await clip('small-pin.mp4', ['-b:v', '200k', '-vf', 'scale=640:360']);
+    const info = await stat(source);
+    const store = new RenditionStore({ cacheDir });
+    const variant = store.variant(source, info.size, info.mtimeMs);
+    expect(variant).toMatch(/^o[0-9a-f]{24}$/);
+    expect(store.pinned(source, info.size, info.mtimeMs, variant!)).toBe(source);
+    // An edit changes the key, so a stale pin is served as if unpinned.
+    expect(store.pinned(source, info.size + 1, info.mtimeMs, variant!)).toBeNull();
+    expect(store.variant('/x/still.png', 10, 0)).toBeNull();
   }, 60_000);
 
   it('forgets renditions nothing has needed for a season', async () => {
