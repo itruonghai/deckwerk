@@ -56,6 +56,35 @@ describe('speaker view', () => {
     commands = [];
   });
 
+  it('makes the notes larger and smaller, and remembers the size', () => {
+    localStorage.removeItem('deckwerk.speakerNotesScale');
+    const view = open();
+    const notes = host.querySelector<HTMLElement>('.speaker-notes')!;
+    const larger = host.querySelector<HTMLButtonElement>('.speaker-notes-larger')!;
+    const smaller = host.querySelector<HTMLButtonElement>('.speaker-notes-smaller')!;
+    const scale = () => Number(notes.style.getPropertyValue('--notes-scale'));
+    expect(scale()).toBe(1);
+    larger.click();
+    larger.click();
+    expect(scale()).toBeCloseTo(1.5);
+    expect(host.classList.contains('notes-large')).toBe(true);
+    smaller.click();
+    expect(scale()).toBeCloseTo(1.25);
+    view.destroy();
+
+    // A presenter who chose a size gets it again next time.
+    open();
+    expect(Number(host.querySelector<HTMLElement>('.speaker-notes')!.style.getPropertyValue('--notes-scale')))
+      .toBeCloseTo(1.25);
+    // And it stops at both ends instead of vanishing or overflowing.
+    const again = host.querySelector<HTMLButtonElement>('.speaker-notes-smaller')!;
+    for (let i = 0; i < 20; i += 1) again.click();
+    expect(again.disabled).toBe(true);
+    expect(Number(host.querySelector<HTMLElement>('.speaker-notes')!.style.getPropertyValue('--notes-scale')))
+      .toBeCloseTo(0.75);
+    localStorage.removeItem('deckwerk.speakerNotesScale');
+  });
+
   it('previews the current and the following slide', () => {
     const view = open();
     view.setDeck(deckOf(['Intro', 'Method', 'Results']));

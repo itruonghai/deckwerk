@@ -76,7 +76,13 @@ const MARKUP = `
         <div class="presenter-clock wall-clock"><span>Local time</span><strong class="speaker-wall-clock">--:--</strong></div>
       </section>
       <section class="notes-panel" aria-label="Speaker notes">
-        <h2>Notes</h2>
+        <div class="panel-heading">
+          <h2>Notes</h2>
+          <div class="notes-size" role="group" aria-label="Notes text size">
+            <button class="speaker-notes-smaller" title="Smaller notes" aria-label="Smaller notes">A−</button>
+            <button class="speaker-notes-larger" title="Larger notes" aria-label="Larger notes">A+</button>
+          </div>
+        </div>
         <div class="speaker-notes"></div>
       </section>
     </aside>
@@ -95,6 +101,29 @@ const MARKUP = `
     <button class="speaker-end danger">End show</button>
   </footer>
 `;
+
+/**
+ * The notes' text size, a factor on the default, chosen with A−/A+ and kept
+ * per machine: the presenter reads them from further away than the editor.
+ */
+const NOTES_SCALE_KEY = 'deckwerk.speakerNotesScale';
+const NOTES_SCALE_MIN = 0.75;
+const NOTES_SCALE_MAX = 3;
+const NOTES_SCALE_STEP = 0.25;
+
+function clampNotesScale(value: number): number {
+  const stepped = Math.round(value / NOTES_SCALE_STEP) * NOTES_SCALE_STEP;
+  return Math.min(NOTES_SCALE_MAX, Math.max(NOTES_SCALE_MIN, stepped));
+}
+
+function storedNotesScale(): number {
+  try {
+    const value = Number(localStorage.getItem(NOTES_SCALE_KEY));
+    return value > 0 ? clampNotesScale(value) : 1;
+  } catch {
+    return 1;
+  }
+}
 
 export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   const { host, resolveSrc, onCommand, now = () => Date.now() } = options;
@@ -115,6 +144,8 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   const slideTimer = pick('.speaker-slide-timer');
   const wallClock = pick('.speaker-wall-clock');
   const notes = pick('.speaker-notes');
+  const notesSmaller = pick<HTMLButtonElement>('.speaker-notes-smaller');
+  const notesLarger = pick<HTMLButtonElement>('.speaker-notes-larger');
   const swap = pick<HTMLButtonElement>('.speaker-swap');
   const end = pick<HTMLButtonElement>('.speaker-end');
   const overview = pick('.speaker-overview');
@@ -132,6 +163,27 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
     if (options.swapLabel) swap.textContent = options.swapLabel;
     swap.title = options.swapTitle ?? 'Swap the audience and speaker displays';
   }
+
+  let notesScale = storedNotesScale();
+  function showNotesScale(): void {
+    notes.style.setProperty('--notes-scale', String(notesScale));
+    // Larger notes need the room more than the clocks need their size.
+    host.classList.toggle('notes-large', notesScale > 1);
+    notesSmaller.disabled = notesScale <= NOTES_SCALE_MIN;
+    notesLarger.disabled = notesScale >= NOTES_SCALE_MAX;
+  }
+  function stepNotesScale(direction: 1 | -1): void {
+    notesScale = clampNotesScale(notesScale + direction * NOTES_SCALE_STEP);
+    try {
+      localStorage.setItem(NOTES_SCALE_KEY, String(notesScale));
+    } catch {
+      // A locked-down profile still gets the size for this show.
+    }
+    showNotesScale();
+  }
+  notesSmaller.addEventListener('click', () => stepNotesScale(-1));
+  notesLarger.addEventListener('click', () => stepNotesScale(1));
+  showNotesScale();
 
   let deck: Deck | null = null;
   let theme: HTMLStyleElement | null = null;
@@ -359,7 +411,7 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
       theme?.remove();
       theme = null;
       host.replaceChildren();
-      host.classList.remove('speaker-view', 'overview-open', 'overview-grid');
+      host.classList.remove('speaker-view', 'overview-open', 'overview-grid', 'notes-large');
     },
   };
 }
