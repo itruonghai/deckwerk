@@ -94,7 +94,7 @@
   .remote-view .speaker-current { aspect-ratio: 16 / 9; }
   .remote-view .speaker-sidebar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
   .remote-view .next-panel { grid-template-rows: 22px auto; }
-  .remote-view .timers { gap: 8px; }
+  .remote-view .timers { flex-direction: column; align-items: stretch; justify-content: center; flex-wrap: nowrap; gap: 8px; }
   .remote-view .notes-panel { grid-column: 1 / -1; grid-template-rows: 22px minmax(0, 1fr); }
   .remote-view .speaker-notes { font-size: 16px; }
   .remote-view .presentation-clock strong { font-size: 30px; }
@@ -114,7 +114,7 @@
   .remote-view .current-panel { grid-template-rows: 24px minmax(0, 1fr); }
   .remote-view .speaker-sidebar { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); gap: 10px; }
   .remote-view .next-panel { grid-template-rows: 22px auto; }
-  .remote-view .timers { gap: 6px; justify-content: flex-start; }
+  .remote-view .timers { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 6px; justify-content: flex-start; }
   .remote-view .wall-clock { display: none; }
   .remote-view .notes-panel { grid-column: 1 / -1; grid-template-rows: 22px minmax(0, 1fr); }
   .remote-view .speaker-notes { font-size: 15px; }

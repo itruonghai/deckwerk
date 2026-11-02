@@ -205,8 +205,6 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
   let notesScale = storedNotesScale();
   function showNotesScale(): void {
     notes.style.setProperty('--notes-scale', String(notesScale));
-    // Larger notes need the room more than the clocks need their size.
-    host.classList.toggle('notes-large', notesScale > 1);
     notesSmaller.disabled = notesScale <= NOTES_SCALE_MIN;
     notesLarger.disabled = notesScale >= NOTES_SCALE_MAX;
   }
@@ -548,7 +546,7 @@ export function createSpeakerView(options: SpeakerViewOptions): SpeakerView {
       theme?.remove();
       theme = null;
       host.replaceChildren();
-      host.classList.remove('speaker-view', 'overview-open', 'overview-grid', 'notes-large', 'speaker-resizing');
+      host.classList.remove('speaker-view', 'overview-open', 'overview-grid', 'speaker-resizing');
     },
   };
 }

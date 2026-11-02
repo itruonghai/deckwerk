@@ -9,34 +9,34 @@ html, body { width: 100%; height: 100%; overflow: hidden; }
 .speaker-sidebar { display: grid; grid-template-rows: auto auto 22px minmax(0, 1fr); min-width: 0; min-height: 0; }
 .speaker-sidebar.notes-sized { grid-template-rows: minmax(0, 1fr) auto 22px minmax(0, var(--speaker-notes-height)); }
 .notes-sized .next-panel { grid-template-rows: 30px minmax(0, 1fr); }
-.notes-sized .next-panel .preview { aspect-ratio: auto; }
+.notes-sized .next-panel .preview { aspect-ratio: auto; max-height: none; }
 /* The dividers between panels: a hairline on hover that the presenter drags. */
 .speaker-splitter { position: relative; touch-action: none; user-select: none; }
-.speaker-splitter::after { content: ""; position: absolute; border-radius: 2px; background: transparent; transition: background .15s; }
+.speaker-splitter::after { content: ""; position: absolute; border-radius: 2px; background: var(--line); transition: background .15s, inset .15s; }
 .speaker-sidebar-splitter { cursor: col-resize; }
-.speaker-sidebar-splitter::after { inset: 0 8px; }
+.speaker-sidebar-splitter::after { inset: 0 9px; }
 .speaker-notes-splitter { cursor: row-resize; }
-.speaker-notes-splitter::after { inset: 9px 0; }
+.speaker-notes-splitter::after { inset: 10px 0; }
 .speaker-splitter:hover::after, .speaker-splitter:focus-visible::after, .speaker-resizing .speaker-splitter:active::after { background: var(--accent); }
+.speaker-sidebar-splitter:hover::after, .speaker-sidebar-splitter:focus-visible::after { inset: 0 8px; }
+.speaker-notes-splitter:hover::after, .speaker-notes-splitter:focus-visible::after { inset: 9px 0; }
 .speaker-splitter:focus-visible { outline: none; }
 .speaker-resizing, .speaker-resizing * { user-select: none; }
 .speaker-resizing .preview { pointer-events: none; }
 .next-panel { grid-template-rows: 30px auto; }
-.next-panel .preview { aspect-ratio: 16 / 9; }
-.timers { margin-top: 22px; display: flex; flex-direction: column; justify-content: center; gap: clamp(18px, 3vh, 32px); min-height: 0; }
+/* Capped, so a wider side column gives its room to the notes rather than to a taller preview. */
+.next-panel .preview { width: 100%; aspect-ratio: 16 / 9; max-height: 34vh; }
+/* The three clocks share one row: the notes need the height more. */
+.timers { margin-top: 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 8px 16px; min-height: 0; }
 .presenter-clock { display: grid; gap: 6px; }
 .presenter-clock span { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .presenter-clock strong { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace; font-variant-numeric: tabular-nums; line-height: .95; }
-.presentation-clock strong { font-size: clamp(58px, 6vw, 84px); font-weight: 750; letter-spacing: -.06em; }
-.slide-clock strong { font-size: clamp(42px, 4.5vw, 62px); font-weight: 700; letter-spacing: -.05em; }
-.wall-clock strong { color: var(--text); font-size: clamp(28px, 3vw, 42px); font-weight: 650; letter-spacing: -.04em; }
+.presentation-clock strong { font-size: clamp(28px, 2.6vw, 44px); font-weight: 750; letter-spacing: -.05em; }
+.slide-clock strong { font-size: clamp(28px, 2.6vw, 44px); font-weight: 700; letter-spacing: -.05em; }
+.wall-clock strong { color: var(--text); font-size: clamp(22px, 2vw, 34px); font-weight: 650; letter-spacing: -.04em; }
 .notes-panel { display: grid; grid-template-rows: 30px minmax(0, 1fr); min-height: 0; }
 .speaker-notes { overflow-y: auto; white-space: pre-wrap; font-size: calc(clamp(16px, 1.6vw, 24px) * var(--notes-scale, 1)); line-height: 1.4; }
 .notes-size { display: flex; gap: 4px; }
-/* With the notes enlarged, the clocks share one compact row and the notes take the rest. */
-.notes-large .timers { flex-direction: row; justify-content: space-between; gap: 12px; }
-.notes-large .presentation-clock strong, .notes-large .slide-clock strong { font-size: clamp(26px, 2.4vw, 36px); }
-.notes-large .wall-clock strong { font-size: clamp(20px, 1.8vw, 28px); }
 .notes-size button { min-width: 34px; padding: 2px 6px; font-size: 12px; line-height: 1.2; }
 .speaker-position { color: var(--muted); font-size: 15px; white-space: nowrap; }
 .speaker-view h2 { margin: 0; color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }

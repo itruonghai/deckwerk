@@ -67,7 +67,6 @@ describe('speaker view', () => {
     larger.click();
     larger.click();
     expect(scale()).toBeCloseTo(1.5);
-    expect(host.classList.contains('notes-large')).toBe(true);
     smaller.click();
     expect(scale()).toBeCloseTo(1.25);
     view.destroy();
