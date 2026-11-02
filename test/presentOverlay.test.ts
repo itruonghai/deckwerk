@@ -44,7 +44,7 @@ describe('present URLs', () => {
 });
 
 describe('starting a browser presentation', () => {
-  let opened: Array<{ url: string; name: string }>;
+  let opened: Array<{ url: string; name: string; features: string }>;
   let audienceWindows: Array<{ closed: boolean; close: () => void }>;
   let popupsAllowed: boolean;
   let statuses: string[];
@@ -55,8 +55,8 @@ describe('starting a browser presentation', () => {
     audienceWindows = [];
     popupsAllowed = true;
     statuses = [];
-    vi.stubGlobal('open', (url: string, name: string) => {
-      opened.push({ url, name });
+    vi.stubGlobal('open', (url: string, name: string, features = '') => {
+      opened.push({ url, name, features });
       if (!popupsAllowed) return null;
       const handle = { closed: false, close: () => { handle.closed = true; } };
       audienceWindows.push(handle);
@@ -110,6 +110,16 @@ describe('starting a browser presentation', () => {
 
     expect(query(overlayFrame()!.src).get('role')).toBe('speaker');
     expect(statuses.join(' ')).toContain('Speaker View');
+  });
+
+  it('opens the audience as a window of its own, beside a Speaker View that is not fullscreen', () => {
+    startPresenting('talk', 0, seed, { speakerView: true });
+
+    // Without features a browser opens a tab, which can neither sit beside
+    // Speaker View nor be dragged to the projector on its own.
+    expect(opened[0].features).toMatch(/^popup,left=-?\d+,top=-?\d+,width=\d+,height=\d+$/);
+    // Fullscreen would raise Speaker View over the audience window.
+    expect(overlayFrame()!.requestFullscreen).not.toHaveBeenCalled();
   });
 
   it('gives both surfaces the same range', () => {
@@ -426,7 +436,7 @@ describe('presenting with a second screen attached', () => {
     expect(speaker.get('embed')).toBeNull();
     expect(opened[0].features).toBe('popup,left=0,top=25,width=1512,height=957');
     // Nobody has to drag a window anywhere.
-    expect(statuses.join(' ')).not.toContain('move the new window');
+    expect(statuses.join(' ')).not.toContain('drag the slides window');
   });
 
   it('does the same for Present in Speaker View', async () => {
@@ -529,10 +539,10 @@ describe('presenting with a second screen attached', () => {
     releasePrompt();
     await started;
 
-    // Exactly today's Speaker View: audience in a pop-up, speaker in the tab.
-    expect(fullscreenScreens).toEqual([null]);
+    // One-screen Speaker View: audience in a window of its own, speaker in the tab.
+    expect(fullscreenScreens).toEqual([]);
     expect(opened).toHaveLength(1);
-    expect(opened[0].features).toBe('');
+    expect(opened[0].features).toMatch(/^popup,/);
     expect(query(opened[0].url).get('role')).toBeNull();
     expect(query(overlayFrame()!.src).get('role')).toBe('speaker');
   });

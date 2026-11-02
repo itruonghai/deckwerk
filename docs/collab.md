@@ -405,13 +405,15 @@ the participant id.
   in the rail first presents just that range, ending the show after the last
   one — the same `rangeForSlideSelection` rule as the desktop app.
 - **Present → Present in Speaker View** — opens the audience in a second
-  browser window and turns this tab into Speaker View: current and next slide,
+  browser window (a real window, 16:9 in the top-right corner of the screen,
+  not a tab) and turns this tab into Speaker View, left out of fullscreen so
+  the two sit side by side: current and next slide,
   build position, presentation and slide timers, wall clock, and
   previous/blank/next/end. **Slides** (or `O`) opens a scrollable thumbnail
   rail beside the current slide; **All slides** (or `G`) opens a full grid.
   Hidden slides appear dimmed and marked Hidden in both views, and clicking one
-  can show it directly. Move the audience window to the projector and press
-  `F` there for fullscreen. The two surfaces are the same page in different
+  can show it directly. Drag the audience window to the projector and click it
+  (or press `F`) for fullscreen. The two surfaces are the same page in different
   roles, and they talk over a `BroadcastChannel` scoped to the deck rather than
   through the server — presenter commands stay private to the presenter and
   keep working across a network hiccup. **Switch views** trades the roles of

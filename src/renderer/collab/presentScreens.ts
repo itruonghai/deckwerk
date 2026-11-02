@@ -74,6 +74,20 @@ export function speakerWindowFeatures(home: ScreenArea): string {
   return `popup,left=${home.availLeft},top=${home.availTop},width=${home.availWidth},height=${home.availHeight}`;
 }
 
+/**
+ * `window.open` features for the audience when the browser cannot place it on
+ * the projector: a 16:9 window, half the editor screen wide, in its top-right
+ * corner. Without features a browser opens a tab, which cannot be dragged
+ * beside Speaker View or onto the other screen as one piece.
+ */
+export function audienceWindowFeatures(home: Partial<ScreenArea> & { availWidth: number; availHeight: number }): string {
+  const width = Math.round(Math.min(home.availWidth / 2, home.availHeight * 16 / 9));
+  const height = Math.round(width * 9 / 16);
+  const left = (home.availLeft ?? 0) + home.availWidth - width;
+  const top = home.availTop ?? 0;
+  return `popup,left=${left},top=${top},width=${width},height=${height}`;
+}
+
 export type ScreenDecision<T extends ScreenArea> =
   | { kind: 'two-screens'; audience: T; home: T }
   | { kind: 'this-screen' }

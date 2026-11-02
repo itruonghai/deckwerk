@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  audienceWindowFeatures,
   chooseAudienceScreen,
   decideAfterScreenDetails,
   mayUseSecondScreen,
@@ -79,6 +80,18 @@ describe('placing Speaker View', () => {
   it('fills the available area of the editor screen', () => {
     expect(speakerWindowFeatures(laptop)).toBe('popup,left=0,top=25,width=1512,height=957');
     expect(speakerWindowFeatures(monitor)).toBe('popup,left=-1512,top=25,width=1512,height=957');
+  });
+});
+
+describe('placing the audience when the browser cannot reach the projector', () => {
+  it('opens a 16:9 window, half the screen wide, in its top-right corner', () => {
+    expect(audienceWindowFeatures(laptop)).toBe('popup,left=756,top=25,width=756,height=425');
+    expect(audienceWindowFeatures(monitor)).toBe('popup,left=-756,top=25,width=756,height=425');
+  });
+
+  it('keeps the window within a wide, short screen', () => {
+    expect(audienceWindowFeatures({ availWidth: 3440, availHeight: 540 }))
+      .toBe('popup,left=2480,top=0,width=960,height=540');
   });
 });
 

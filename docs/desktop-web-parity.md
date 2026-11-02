@@ -21,7 +21,9 @@ are intentionally omitted.
   surfaces itself: the editor tab's audience fullscreen on the other screen,
   Speaker View in a pop-up on the editor's (`presentScreens.ts`). Elsewhere
   placement stays user-driven — "Present in Speaker View" opens the audience
-  in a second window for the presenter to move to the projector.
+  in a second window (opened with window features, so a window and not a
+  tab) for the presenter to move to the projector, beside a Speaker View that
+  stays out of fullscreen so it cannot cover it.
 - [x] **P0 — Display-role controls.** The desktop moves its two windows
   between enumerated displays; a browser cannot place a window at all. So the
   browser's **Switch views** trades the roles of the two surfaces in place,

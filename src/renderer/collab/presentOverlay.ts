@@ -23,6 +23,7 @@
 import type { Deck } from '@shared/deck.js';
 import { mediaVariantsSnapshot } from './mediaVariants.js';
 import {
+  audienceWindowFeatures,
   decideAfterScreenDetails,
   mayUseSecondScreen,
   planForPermission,
@@ -307,12 +308,13 @@ function presentOnThisScreen(
     const audience = window.open(
       presentUrl(deckId, slideIndex, { endSlideIndex: options.endSlideIndex }),
       `deckwerk-audience-${deckId}`,
+      audienceWindowFeatures(window.screen as unknown as ScreenArea),
     );
     if (audience) {
       speakerView = true;
       companionWindow = audience;
       options.onStatus?.(
-        'Speaker View is here — move the new window to the projector and press F for fullscreen.',
+        'Speaker View is here — drag the slides window to the projector and click it for fullscreen.',
       );
     } else {
       options.onStatus?.(PRESENT_NEEDS_POPUP);
@@ -320,6 +322,10 @@ function presentOnThisScreen(
   }
 
   const frame = mountOverlay(deckId, slideIndex, seed, options, speakerView ? 'speaker' : 'audience');
+  // Speaker View stays in the window: fullscreen would raise it over the
+  // audience window just opened (on macOS, into a Space of its own), so the
+  // two could never sit side by side.
+  if (speakerView) return;
   frame.requestFullscreen().catch(() => {
     // Fullscreen refused: the overlay still covers the tab, so presenting works
     // and the viewer can hit F for fullscreen once they interact.
