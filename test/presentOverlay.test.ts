@@ -496,6 +496,7 @@ describe('presenting with a second screen attached', () => {
     expect(overlayFrame()).not.toBeNull();
     expect(query(overlayFrame()!.src).get('role')).toBeNull();
     expect(opened).toEqual([]);
+    expect(statuses.at(-1)).toContain('other screen');
   });
 
   it('asks once, then presents on both screens when allowed straight away', async () => {
@@ -561,19 +562,32 @@ describe('presenting with a second screen attached', () => {
     expect(statuses.at(-1)).toContain('press Present again');
   });
 
-  it('never asks again once refused, and presents on this screen', async () => {
+  it('never asks again once refused, and presents on this screen saying why', async () => {
     permission = 'denied';
-    await startPresenting('talk', 0, seed);
+    await startPresenting('talk', 0, seed, { onStatus: (m) => statuses.push(m) });
 
     expect(screenDetailsCalls).toBe(0);
     expect(fullscreenScreens).toEqual([null]);
     expect(opened).toEqual([]);
+    // Silence here looked like Present ignoring the second screen.
+    expect(statuses.at(-1)).toContain('blocked for this site');
+  });
+
+  it('says why, and still offers the drag, when Speaker View cannot use the other screen', async () => {
+    permission = 'denied';
+    await startPresenting('talk', 0, seed, { speakerView: true, onStatus: (m) => statuses.push(m) });
+
+    expect(opened[0].features).toMatch(/^popup,/);
+    expect(statuses.at(-1)).toContain('blocked for this site');
+    expect(statuses.at(-1)).toContain('drag the slides window');
   });
 
   it('presents on this screen, without asking, when there is only one screen', () => {
     define(window.screen, 'isExtended', false);
     // Synchronous, exactly as before: nothing awaited before the overlay.
-    void startPresenting('talk', 0, seed);
+    void startPresenting('talk', 0, seed, { onStatus: (m) => statuses.push(m) });
+    // Nothing to explain on a laptop alone.
+    expect(statuses).toEqual([]);
 
     expect(overlayFrame()).not.toBeNull();
     expect(screenDetailsCalls).toBe(0);

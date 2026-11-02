@@ -73,6 +73,9 @@ export const PRESENT_ASKING_FOR_SCREENS = 'To present on the other screen, allow
 export const PRESENT_SCREENS_ALLOWED = 'Window management allowed — press Present again to show the slides on the other screen.';
 export const PRESENT_SCREENS_REFUSED = 'Window management was not allowed, so Present uses this screen — press Present again to start.';
 export const PRESENT_ON_THIS_SCREEN = 'Presenting on this screen — allow window management for this site to use the other screen.';
+export const PRESENT_SCREENS_BLOCKED = 'Window management is blocked for this site, so the slides stay on this screen. '
+  + 'To use the other screen, allow it in the site settings (the icon left of the address), then present again.';
+export const PRESENT_OTHER_SCREEN_REFUSED = 'The browser would not go fullscreen on the other screen, so the slides are on this one.';
 let seedProvider: (() => PresentSeed) | null = null;
 /**
  * The pop-up that is the presentation's other surface — the audience for a
@@ -233,7 +236,10 @@ export async function startPresenting(
   const plan = planForPermission(await windowManagementPermission());
   if (start !== starts) return;
   if (plan === 'this-screen') {
-    presentOnThisScreen(deckId, slideIndex, seed, options);
+    // A second screen is attached and the person once said no (or dismissed
+    // the prompt until the browser stopped asking): say so, or Present just
+    // looks broken on two screens.
+    presentOnThisScreen(deckId, slideIndex, seed, options, PRESENT_SCREENS_BLOCKED);
     return;
   }
   if (plan === 'ask') options.onStatus?.(PRESENT_ASKING_FOR_SCREENS);
@@ -254,8 +260,8 @@ export async function startPresenting(
     return;
   }
   if (decision.kind === 'this-screen') {
-    if (plan === 'ask' && !details) options.onStatus?.(PRESENT_ON_THIS_SCREEN);
-    presentOnThisScreen(deckId, slideIndex, seed, options);
+    presentOnThisScreen(deckId, slideIndex, seed, options, details ? undefined
+      : plan === 'ask' ? PRESENT_ON_THIS_SCREEN : PRESENT_SCREENS_BLOCKED);
     return;
   }
   await presentOnTwoScreens(deckId, slideIndex, seed, options, decision.audience, decision.home);
@@ -281,6 +287,7 @@ async function presentOnTwoScreens(
     // Refused: the audience still covers this tab, as when fullscreen is
     // refused on one screen. Without the fullscreen there is no pop-up to be
     // had, and a Speaker View over the audience would hide it.
+    options.onStatus?.(PRESENT_OTHER_SCREEN_REFUSED);
     return;
   }
   if (overlay !== frame) return;
@@ -293,12 +300,16 @@ async function presentOnTwoScreens(
   else options.onStatus?.(PRESENT_NEEDS_POPUP);
 }
 
-/** Today's single-screen presentation, synchronously inside the click. */
+/**
+ * Today's single-screen presentation, synchronously inside the click.
+ * `reason` says why the other screen is not being used, when there is one.
+ */
 function presentOnThisScreen(
   deckId: string,
   slideIndex: number,
   seed: (() => PresentSeed) | undefined,
   options: PresentOptions,
+  reason?: string,
 ): void {
   // Open the audience window first: it must happen synchronously inside the
   // gesture or the pop-up blocker takes it. A refusal is not fatal — fall back
@@ -313,12 +324,13 @@ function presentOnThisScreen(
     if (audience) {
       speakerView = true;
       companionWindow = audience;
-      options.onStatus?.(
-        'Speaker View is here — drag the slides window to the projector and click it for fullscreen.',
-      );
+      const drag = 'drag the slides window to the projector and click it for fullscreen.';
+      options.onStatus?.(reason ? `${reason} Or ${drag}` : `Speaker View is here — ${drag}`);
     } else {
       options.onStatus?.(PRESENT_NEEDS_POPUP);
     }
+  } else if (reason) {
+    options.onStatus?.(reason);
   }
 
   const frame = mountOverlay(deckId, slideIndex, seed, options, speakerView ? 'speaker' : 'audience');
