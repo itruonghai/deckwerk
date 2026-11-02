@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyDeck } from '../src/shared/deck.js';
-import { presentUrl, startPresenting } from '../src/renderer/collab/presentOverlay.js';
+import { PRESENT_ON_OTHER_SCREEN, presentUrl, startPresenting } from '../src/renderer/collab/presentOverlay.js';
 
 /**
  * How the browser client opens a presentation: one iframe overlay, plus a
@@ -418,35 +418,36 @@ describe('presenting with a second screen attached', () => {
     promptAnswered = new Promise((resolve) => { releasePrompt = resolve; });
   }
 
-  it('puts the audience fullscreen on the projector and Speaker View on the laptop', async () => {
+  it('puts the audience in a window filling the projector and Speaker View in this tab', async () => {
     await startPresenting('talk', 2, seed, { onStatus: (m) => statuses.push(m) });
 
-    // The editor tab is the audience: it is the one surface the click can
-    // fullscreen, and fullscreen can be sent to another screen.
-    const frame = overlayFrame()!;
-    expect(query(frame.src).get('role')).toBeNull();
-    expect(query(frame.src).get('embed')).toBe('1');
-    expect(fullscreenScreens).toEqual(['Projector']);
-
-    // Speaker View comes automatically, filling the laptop's screen.
+    // The audience is a pop-up on the projector, opened from a window that is
+    // not fullscreen: Chrome on macOS turns a pop-up from a fullscreen window
+    // into a tab of it, which took the audience out of fullscreen and hid it.
     expect(opened).toHaveLength(1);
-    const speaker = query(opened[0].url);
-    expect(speaker.get('role')).toBe('speaker');
-    expect(speaker.get('slide')).toBe('3');
-    expect(speaker.get('embed')).toBeNull();
-    expect(opened[0].features).toBe('popup,left=0,top=25,width=1512,height=957');
-    // Nobody has to drag a window anywhere.
-    expect(statuses.join(' ')).not.toContain('drag the slides window');
+    const audience = query(opened[0].url);
+    expect(audience.get('role')).toBeNull();
+    expect(audience.get('slide')).toBe('3');
+    expect(audience.get('embed')).toBeNull();
+    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
+    expect(fullscreenScreens).toEqual([]);
+
+    // Speaker View comes automatically, in this tab on the laptop.
+    const frame = overlayFrame()!;
+    expect(query(frame.src).get('role')).toBe('speaker');
+    expect(query(frame.src).get('embed')).toBe('1');
+    // Nobody has to drag a window anywhere; one click there goes fullscreen.
+    expect(statuses.at(-1)).toBe(PRESENT_ON_OTHER_SCREEN);
   });
 
   it('does the same for Present in Speaker View', async () => {
     await startPresenting('talk', 0, seed, { speakerView: true, endSlideIndex: 2 });
 
-    expect(fullscreenScreens).toEqual(['Projector']);
     expect(opened).toHaveLength(1);
-    expect(query(opened[0].url).get('role')).toBe('speaker');
+    expect(query(opened[0].url).get('role')).toBeNull();
     expect(query(opened[0].url).get('endSlide')).toBe('3');
-    expect(query(overlayFrame()!.src).get('role')).toBeNull();
+    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
+    expect(query(overlayFrame()!.src).get('role')).toBe('speaker');
     expect(query(overlayFrame()!.src).get('endSlide')).toBe('3');
   });
 
@@ -454,49 +455,37 @@ describe('presenting with a second screen attached', () => {
     details.currentScreen = projector;
     await startPresenting('talk', 0, seed);
 
-    expect(fullscreenScreens).toEqual(['Built-in Retina Display']);
-    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
+    expect(opened[0].features).toBe('popup,left=0,top=25,width=1512,height=957');
+    expect(fullscreenScreens).toEqual([]);
   });
 
-  it('closes Speaker View when the show ends on the projector', async () => {
+  it('closes the projector window when the show ends', async () => {
     await startPresenting('talk', 0, seed);
-    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => overlayFrame() });
-    document.dispatchEvent(new Event('fullscreenchange'));
-    // Escape on the projector leaves fullscreen.
-    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => null });
-    document.dispatchEvent(new Event('fullscreenchange'));
+    // Ending the show from either surface reaches this tab as present-exit.
+    window.dispatchEvent(new MessageEvent('message', { origin: location.origin, data: { type: 'present-exit' } }));
 
     expect(overlayFrame()).toBeNull();
     expect(popups.map((popup) => popup.closed)).toEqual([true]);
   });
 
-  it('ends the projector when Speaker View ends the show', async () => {
-    await startPresenting('talk', 0, seed);
-    // Speaker View's End show says goodbye on the bus; the audience in the
-    // overlay hears it and tells this tab.
-    window.dispatchEvent(new MessageEvent('message', { origin: location.origin, data: { type: 'present-exit' } }));
-
-    expect(overlayFrame()).toBeNull();
-    expect(popups[0].closed).toBe(true);
-  });
-
-  it('keeps the projector going, and says why, when the pop-up is blocked', async () => {
+  it('puts the audience fullscreen on the projector, and says why, when the pop-up is blocked', async () => {
     popupsAllowed = false;
     await startPresenting('talk', 0, seed, { onStatus: (m) => statuses.push(m) });
 
+    // The blocked pop-up left the click unspent, so it can still send this tab there.
     expect(fullscreenScreens).toEqual(['Projector']);
-    expect(overlayFrame()).not.toBeNull();
+    expect(query(overlayFrame()!.src).get('role')).toBeNull();
     expect(statuses.join(' ')).toContain('allow pop-ups');
   });
 
-  it('presents in this tab, without Speaker View, when the projector refuses fullscreen', async () => {
+  it('keeps the audience in this tab, and says why, when the projector refuses fullscreen as well', async () => {
+    popupsAllowed = false;
     fullscreenRefused = true;
     await startPresenting('talk', 0, seed, { onStatus: (m) => statuses.push(m) });
+    await vi.waitFor(() => expect(statuses.at(-1)).toContain('other screen'));
 
     expect(overlayFrame()).not.toBeNull();
     expect(query(overlayFrame()!.src).get('role')).toBeNull();
-    expect(opened).toEqual([]);
-    expect(statuses.at(-1)).toContain('other screen');
   });
 
   it('asks once, then presents on both screens when allowed straight away', async () => {
@@ -509,8 +498,8 @@ describe('presenting with a second screen attached', () => {
     releasePrompt();
     await started;
 
-    expect(fullscreenScreens).toEqual(['Projector']);
-    expect(query(opened[0].url).get('role')).toBe('speaker');
+    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
+    expect(query(overlayFrame()!.src).get('role')).toBe('speaker');
   });
 
   it('starts nothing, and says to press Present again, when the click expired during the prompt', async () => {
@@ -529,7 +518,7 @@ describe('presenting with a second screen attached', () => {
     // Next time the permission is there: straight to both screens.
     activation.isActive = true;
     await startPresenting('talk', 0, seed);
-    expect(fullscreenScreens).toEqual(['Projector']);
+    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
     expect(screenDetailsCalls).toBe(2);
   });
 

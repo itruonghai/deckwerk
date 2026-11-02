@@ -425,13 +425,16 @@ the participant id.
   this tab and says why.
 - **Present with a second screen** (Chrome and Edge, through the Window
   Management API) — when `screen.isExtended` says another screen is attached,
-  Present (plain or Speaker View) sends this tab's presentation fullscreen to
-  that screen as the audience and opens Speaker View in a pop-up filling the
-  screen the editor is on, from the one click, like the desktop app. Press `F`
-  in Speaker View to make it fullscreen too. The first time, the browser asks
+  Present (plain or Speaker View) opens the audience in a window filling that
+  screen and turns this tab into Speaker View, from the one click, like the
+  desktop app; click the audience window once for fullscreen (opening it spent
+  the click). Not the other way round: in Chrome on macOS a pop-up opened from
+  a fullscreen window becomes a tab of that window, which ended the audience's
+  fullscreen and hid it behind Speaker View. The first time, the browser asks
   to allow window management; if that takes longer than the click lasts,
   nothing starts and the status line says to press Present again. Refused, no
-  API (Safari, Firefox) or one screen: Present behaves as described above. The
+  API (Safari, Firefox) or one screen: Present behaves as described above, and
+  with a second screen attached the status line says why it is not used. The
   choice of screen is `src/renderer/collab/presentScreens.ts`.
 - **Sidebar tabs** — Props, Theme (the full preset gallery + adoption
   controls, shared code with the desktop app), Build, History. Restoring a

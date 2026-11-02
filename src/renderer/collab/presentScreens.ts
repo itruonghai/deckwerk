@@ -5,9 +5,8 @@
  * Chrome's Window Management API is the only way a page can see a second
  * screen: `screen.isExtended` says there is one (no prompt), and
  * `getScreenDetails()` lists them once the person has allowed "window
- * management" for the site. With that, the click on Present can fullscreen an
- * element on a chosen screen, and then open one pop-up on another screen in
- * the same click (the spec's "initiate multi-screen experiences" case).
+ * management" for the site. With that, the click on Present can open the
+ * audience's pop-up on the other screen.
  *
  * The decisions live here, free of the DOM, so they can be tested on their
  * own; presentOverlay.ts does the asking and the opening.
@@ -69,8 +68,8 @@ export function chooseAudienceScreen<T extends ScreenArea>(screens: readonly T[]
   return others.find((screen) => screen.isInternal === false) ?? others[0] ?? null;
 }
 
-/** `window.open` features for a Speaker View that fills the presenter's screen. */
-export function speakerWindowFeatures(home: ScreenArea): string {
+/** `window.open` features for a pop-up that fills a screen: the audience's, on two screens. */
+export function fillScreenFeatures(home: ScreenArea): string {
   return `popup,left=${home.availLeft},top=${home.availTop},width=${home.availWidth},height=${home.availHeight}`;
 }
 

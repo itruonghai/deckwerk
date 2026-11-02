@@ -18,8 +18,9 @@ are intentionally omitted.
   collaboration socket: presenter commands are private to the presenter and
   must keep working when the network does not. Where the browser has the
   Window Management API (Chrome, Edge) and a second screen, Present places the
-  surfaces itself: the editor tab's audience fullscreen on the other screen,
-  Speaker View in a pop-up on the editor's (`presentScreens.ts`). Elsewhere
+  surfaces itself: the audience in a pop-up filling the other screen (one
+  click there for fullscreen), Speaker View in the editor tab
+  (`presentScreens.ts`). Elsewhere
   placement stays user-driven — "Present in Speaker View" opens the audience
   in a second window (opened with window features, so a window and not a
   tab) for the presenter to move to the projector, beside a Speaker View that

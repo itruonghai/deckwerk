@@ -12,12 +12,15 @@
  * the editor is already on the presenter's own screen, and the one window the
  * gesture is allowed to open is the one that has to travel to the projector.
  *
- * Unless the browser can see the projector. Chrome's Window Management API
- * lists the screens, and lets the click fullscreen an element on a chosen one
- * and then open a pop-up on another. With a second screen the overlay is the
- * *audience*, fullscreened onto the other screen, and the pop-up is Speaker
- * View, filling the screen the editor is on — automatically, for plain Present
+ * When the browser can see the projector (Chrome's Window Management API),
+ * it can also put that window there: the audience pop-up fills the other
+ * screen and the overlay is Speaker View, automatically, for plain Present
  * too, as the desktop app does (presentScreens.ts decides which is which).
+ * The pop-up goes fullscreen on its first click. The other way round —
+ * fullscreen the overlay onto the projector, then open Speaker View — fails in
+ * Chrome on macOS: a pop-up opened from a fullscreen window becomes a tab of
+ * that window, and switching to it ended the fullscreen, leaving the audience
+ * hidden behind Speaker View in the editor's window.
  */
 
 import type { Deck } from '@shared/deck.js';
@@ -25,9 +28,9 @@ import { mediaVariantsSnapshot } from './mediaVariants.js';
 import {
   audienceWindowFeatures,
   decideAfterScreenDetails,
+  fillScreenFeatures,
   mayUseSecondScreen,
   planForPermission,
-  speakerWindowFeatures,
   type ScreenArea,
   type ScreenDetailsLike,
   type WindowManagementPermission,
@@ -76,6 +79,7 @@ export const PRESENT_ON_THIS_SCREEN = 'Presenting on this screen — allow windo
 export const PRESENT_SCREENS_BLOCKED = 'Window management is blocked for this site, so the slides stay on this screen. '
   + 'To use the other screen, allow it in the site settings (the icon left of the address), then present again.';
 export const PRESENT_OTHER_SCREEN_REFUSED = 'The browser would not go fullscreen on the other screen, so the slides are on this one.';
+export const PRESENT_ON_OTHER_SCREEN = 'The slides are on the other screen — click them once for fullscreen.';
 let seedProvider: (() => PresentSeed) | null = null;
 /**
  * The pop-up that is the presentation's other surface — the audience for a
@@ -264,40 +268,39 @@ export async function startPresenting(
       : plan === 'ask' ? PRESENT_ON_THIS_SCREEN : PRESENT_SCREENS_BLOCKED);
     return;
   }
-  await presentOnTwoScreens(deckId, slideIndex, seed, options, decision.audience, decision.home);
+  presentOnTwoScreens(deckId, slideIndex, seed, options, decision.audience);
 }
 
 /**
- * The audience in this tab's overlay, fullscreen on the other screen; then
- * Speaker View as a pop-up filling the editor's screen. Chrome lets a click
- * that fullscreened onto another screen open that one pop-up as well.
+ * The audience in a pop-up filling the other screen, Speaker View in this tab.
+ * Opening the pop-up spends the click, so the audience goes fullscreen on its
+ * own first click (present.ts shows the hint). Pop-ups refused: the click is
+ * still unspent, so the audience goes fullscreen on the other screen from here.
  */
-async function presentOnTwoScreens(
+function presentOnTwoScreens(
   deckId: string,
   slideIndex: number,
   seed: (() => PresentSeed) | undefined,
   options: PresentOptions,
   audience: ScreenArea,
-  home: ScreenArea,
-): Promise<void> {
-  const frame = mountOverlay(deckId, slideIndex, seed, options, 'audience');
-  try {
-    await frame.requestFullscreen({ screen: audience } as FullscreenOptions);
-  } catch {
-    // Refused: the audience still covers this tab, as when fullscreen is
-    // refused on one screen. Without the fullscreen there is no pop-up to be
-    // had, and a Speaker View over the audience would hide it.
-    options.onStatus?.(PRESENT_OTHER_SCREEN_REFUSED);
+): void {
+  const audienceWindow = window.open(
+    presentUrl(deckId, slideIndex, { endSlideIndex: options.endSlideIndex }),
+    `deckwerk-audience-${deckId}`,
+    fillScreenFeatures(audience),
+  );
+  if (audienceWindow) {
+    companionWindow = audienceWindow;
+    mountOverlay(deckId, slideIndex, seed, options, 'speaker');
+    options.onStatus?.(PRESENT_ON_OTHER_SCREEN);
     return;
   }
-  if (overlay !== frame) return;
-  const speaker = window.open(
-    presentUrl(deckId, slideIndex, { endSlideIndex: options.endSlideIndex, role: 'speaker' }),
-    `deckwerk-speaker-${deckId}`,
-    speakerWindowFeatures(home),
-  );
-  if (speaker) companionWindow = speaker;
-  else options.onStatus?.(PRESENT_NEEDS_POPUP);
+  options.onStatus?.(PRESENT_NEEDS_POPUP);
+  const frame = mountOverlay(deckId, slideIndex, seed, options, 'audience');
+  frame.requestFullscreen({ screen: audience } as FullscreenOptions).catch(() => {
+    // Refused: the audience still covers this tab, as on one screen.
+    options.onStatus?.(PRESENT_OTHER_SCREEN_REFUSED);
+  });
 }
 
 /**

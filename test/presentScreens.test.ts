@@ -3,9 +3,9 @@ import {
   audienceWindowFeatures,
   chooseAudienceScreen,
   decideAfterScreenDetails,
+  fillScreenFeatures,
   mayUseSecondScreen,
   planForPermission,
-  speakerWindowFeatures,
   type ScreenArea,
 } from '../src/renderer/collab/presentScreens.js';
 
@@ -76,10 +76,10 @@ describe('choosing the audience screen', () => {
   });
 });
 
-describe('placing Speaker View', () => {
-  it('fills the available area of the editor screen', () => {
-    expect(speakerWindowFeatures(laptop)).toBe('popup,left=0,top=25,width=1512,height=957');
-    expect(speakerWindowFeatures(monitor)).toBe('popup,left=-1512,top=25,width=1512,height=957');
+describe('placing a window on a whole screen', () => {
+  it('fills the available area of the screen', () => {
+    expect(fillScreenFeatures(laptop)).toBe('popup,left=0,top=25,width=1512,height=957');
+    expect(fillScreenFeatures(monitor)).toBe('popup,left=-1512,top=25,width=1512,height=957');
   });
 });
 

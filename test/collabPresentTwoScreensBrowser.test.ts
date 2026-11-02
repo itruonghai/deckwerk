@@ -18,17 +18,22 @@ import { collabClientDir } from './support/collabClient.js';
 
 /**
  * Present in a browser that can see a second screen (Chrome's Window
- * Management API on a laptop with a projector): the editor tab goes
- * fullscreen on the projector as the audience, and Speaker View opens on the
- * laptop, from one real click.
+ * Management API on a laptop with a projector): the audience opens in a window
+ * filling the projector and the editor tab becomes Speaker View on the laptop,
+ * from one real click.
+ *
+ * BUG (fixed): the editor tab went fullscreen on the projector and then opened
+ * Speaker View as a pop-up. Chrome on macOS makes a pop-up from a fullscreen
+ * window a tab of that window; switching to it ended the fullscreen and hid
+ * the audience behind Speaker View in the editor's window.
  *
  * BUG (fixed): Present never looked at the screens. The audience went
  * fullscreen over the editor on the laptop, and Speaker View told the
  * presenter to drag a window to the projector.
  *
  * A test machine has one screen, so the API's answers are stubbed in the
- * editor tab: two screens, permission granted, and a requestFullscreen that
- * records which screen it was sent to before going fullscreen in the window.
+ * editor tab: two screens and permission granted; window.open records where
+ * it was asked to put the window and whether the click still counted.
  * Everything else is real: the click's user activation surviving the awaits,
  * the present page in both roles, the bus between them, and ending the show
  * from Speaker View.
@@ -82,13 +87,13 @@ const TWO_SCREENS = `(() => {
   window.__opened = [];
   const open = window.open;
   window.open = function (url, name, features) {
-    window.__opened.push({ url: String(url), features: features || '' });
+    window.__opened.push({ url: String(url), features: features || '', activation: navigator.userActivation.isActive });
     return open.call(this, url, name, features);
   };
   return true;
 })()`;
 
-const OVERLAY_STAGE = `document.querySelector('iframe[src*="present.html"]')?.contentDocument?.getElementById('stage')`;
+const SPEAKER_DOC = `document.querySelector('iframe[src*="present.html"]')?.contentDocument`;
 
 /** Ids of the slide text a surface is showing; one id once a move settles. */
 function shownProbe(root: string): string {
@@ -150,62 +155,59 @@ describe.skipIf(!electronBinary)('presenting from the browser with a second scre
     // Speaker View is automatic, as in the desktop app.
     await editor.clickByText('#toolbar button', 'Present', 'Present');
 
-    await eventually(
-      async () => editor.evaluate<string[]>(shownProbe(OVERLAY_STAGE)),
-      'the audience did not paint its first slide in the editor tab',
-      (ids) => ids.length === 1 && ids[0] === 't1',
-    );
-    const overlaySrc = await editor.evaluate<string>(`document.querySelector('iframe[src*="present.html"]').src`);
-    expect(new URL(overlaySrc).searchParams.get('role')).toBeNull();
-    // The fullscreen went to the projector, still inside the click.
-    await eventually(
-      async () => editor.evaluate<Array<string | null>>('window.__fullscreenScreens'),
-      'the editor tab did not go fullscreen on the projector',
-      (screens) => screens.length === 1 && screens[0] === 'Projector',
-    );
-    expect(await editor.evaluate<boolean[]>('window.__activationAtFullscreen')).toEqual([true]);
-
-    // Speaker View opened on the laptop, filling it.
+    // The audience: a window filling the projector, opened while the click counted.
     const opened = await eventually(
-      async () => editor.evaluate<Array<{ url: string; features: string }>>('window.__opened'),
-      'Speaker View did not open',
+      async () => editor.evaluate<Array<{ url: string; features: string; activation: boolean }>>('window.__opened'),
+      'the audience window did not open',
       (list) => list.length === 1,
     );
-    expect(new URL(opened[0].url, 'http://x/').searchParams.get('role')).toBe('speaker');
-    expect(opened[0].features).toBe('popup,left=0,top=25,width=1512,height=957');
+    expect(new URL(opened[0].url, 'http://x/').searchParams.get('role')).toBeNull();
+    expect(opened[0].features).toBe('popup,left=1512,top=0,width=1920,height=1080');
+    expect(opened[0].activation).toBe(true);
+    // Nothing went fullscreen in the editor's window, so nothing was opened from one.
+    expect(await editor.evaluate<Array<string | null>>('window.__fullscreenScreens')).toEqual([]);
 
-    const speakerTarget = await findTarget(
+    const audienceTarget = await findTarget(
       browser.debugPort,
-      (t) => t.url.includes('present.html') && t.url.includes('role=speaker'),
+      (t) => t.url.includes('present.html') && !t.url.includes('role=speaker') && !t.url.includes('embed=1'),
       browser.log,
     );
-    const speaker = await Cdp.connect(speakerTarget.webSocketDebuggerUrl!);
-    pages.push(speaker);
+    const audience = await Cdp.connect(audienceTarget.webSocketDebuggerUrl!);
+    pages.push(audience);
     await eventually(
-      async () => speaker.evaluate<string | null>(
-        `document.querySelector('.speaker-current .slide')?.textContent?.trim() ?? null`,
+      async () => audience.evaluate<string[]>(shownProbe(`document.getElementById('stage')`)),
+      'the audience window did not paint its first slide',
+      (ids) => ids.length === 1 && ids[0] === 't1',
+    );
+
+    // Speaker View: this tab's overlay.
+    const overlaySrc = await editor.evaluate<string>(`document.querySelector('iframe[src*="present.html"]').src`);
+    expect(new URL(overlaySrc).searchParams.get('role')).toBe('speaker');
+    await eventually(
+      async () => editor.evaluate<string | null>(
+        `${SPEAKER_DOC}?.querySelector('.speaker-current .slide')?.textContent?.trim() ?? null`,
       ),
       'Speaker View did not show the running presentation',
       (text) => text === 'ALPHA SLIDE',
     );
 
-    // Speaker View drives the projector.
-    await speaker.click('.speaker-next-button', 'Speaker View next');
+    await editor.evaluate(`${SPEAKER_DOC}.querySelector('.speaker-next-button').click(), true`);
     await eventually(
-      async () => editor.evaluate<string[]>(shownProbe(OVERLAY_STAGE)),
+      async () => audience.evaluate<string[]>(shownProbe(`document.getElementById('stage')`)),
       'the projector did not advance when Speaker View pressed Next',
       (ids) => ids.length === 1 && ids[0] === 't2',
     );
 
-    // End show in Speaker View ends the projector too, and lands the editor
-    // on the slide the show was on.
-    await speaker.click('.speaker-end', 'End show').catch((error: Error) => {
-      if (!error.message.includes('connection closed')) throw error;
-    });
+    await editor.evaluate(`${SPEAKER_DOC}.querySelector('.speaker-end').click(), true`);
     await eventually(
       async () => editor.evaluate<boolean>(`!document.querySelector('iframe[src*="present.html"]')`),
-      'ending the show in Speaker View left the projector up',
+      'ending the show in Speaker View left it up',
       (gone) => gone,
+    );
+    await eventually(
+      async () => (await fetch(`http://127.0.0.1:${browser!.debugPort}/json/list`)).json() as Promise<Array<{ url: string }>>,
+      'ending the show left the projector window open',
+      (targets) => !targets.some((t) => t.url.includes('present.html')),
     );
     await eventually(
       async () => editor.evaluate<string | null>(ACTIVE_RAIL_SLIDE),
